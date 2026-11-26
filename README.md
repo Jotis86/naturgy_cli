@@ -61,8 +61,13 @@ immediately. If `uv run naturgy` fails with `ModuleNotFoundError` after `uv sync
 naturgy auth login
 ```
 
-It prompts for your **NIF/NIE** and password (hidden). The password is used for one request and is
-never stored or logged. On success it writes the session to the token file.
+It prompts for your **NIF/NIE** and password (hidden). It normalizes them the same way the web app
+does: the NIF loses spaces, dots and hyphens and is uppercased, and literal spaces are removed from
+the password. The password is used for one request and is never stored or logged. On success it
+writes the session to the token file.
+
+If Naturgy refuses the sign-in, the error includes its code (`PS01` means it does not recognize the
+user; `CG09`/`PS04` mean the NIF or password is not valid; `CG08` means too many attempts).
 
 `naturgy auth status` shows the token expiry (decoded from the JWT, offline) and exits `3` when the
 token has expired. `naturgy auth status --check` also calls the API to prove the session works.
@@ -247,6 +252,7 @@ Errors go to stderr as JSON:
 | 2 | `usage` | Invalid arguments, dates, reasons or attachments |
 | 2 | `cancelled` | The claim was not confirmed; nothing was sent |
 | 3 | `auth_expired` | Not signed in, or the session expired/was rejected |
+| 3 | `login_failed` | Sign-in refused (NIF/password or another check); the `code` says which |
 | 3 | `access_denied` | That account or supply was refused, not the session |
 | 5 | `blocked`, `upstream_unavailable` | Bot protection, rate limit, timeout or Naturgy 5xx |
 | 5 | `claim_already_open` | The invoice's account already has an open claim; nothing was sent |

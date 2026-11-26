@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from .client import OmegaClient
+from .client import OmegaClient, normalize_password, normalize_user
 from .errors import (
     AuthError,
     BlockedError,
@@ -29,10 +29,10 @@ def login(
     nif: str,
     password: str,
 ) -> dict[str, Any]:
-    nif = nif.strip()
+    nif = normalize_user(nif)
     if not nif:
         raise UsageError("the NIF/NIE cannot be empty")
-    if not password:
+    if not normalize_password(password):
         raise UsageError("the password cannot be empty")
 
     warning: str | None = None
@@ -128,14 +128,17 @@ def import_tokens(store: FileTokenStore, path: Path) -> dict[str, Any]:
     except json.JSONDecodeError as exc:
         raise UsageError(f"the token export at {path} is not valid JSON") from exc
     tokens = TokenSet.from_export(data)
+    if tokens.nif:
+        tokens.nif = normalize_user(tokens.nif)
     if tokens.nif is None:
-        tokens.nif = (
+        fallback = (
             tokens.user.get("clientCode")
             if isinstance(tokens.user.get("clientCode"), str)
             else tokens.user.get("docNumber")
             if isinstance(tokens.user.get("docNumber"), str)
             else None
         )
+        tokens.nif = normalize_user(fallback) if fallback else None
     with store.lock():
         store.save(tokens)
     return _summary(tokens, store, None)

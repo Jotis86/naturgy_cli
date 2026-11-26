@@ -7,6 +7,7 @@ is mandatory and an empty 200 is reported as `blocked` instead of as a parse err
 
 from __future__ import annotations
 
+import re
 import threading
 import time
 from typing import Any, Self
@@ -19,6 +20,7 @@ from .errors import (
     AuthError,
     BlockedError,
     ClaimAlreadyOpenError,
+    LoginError,
     UpstreamUnavailableError,
     UsageError,
 )
@@ -150,7 +152,14 @@ class OmegaClient:
                     http_status=status,
                 )
         if status == 400:
-            raise UsageError("Naturgy rejected the request parameters", http_status=status)
+            extra: dict[str, Any] = {}
+            if isinstance(data, dict):
+                extra["response_keys"] = sorted(str(key) for key in data)[:12]
+            raise UsageError(
+                "Naturgy rejected the request parameters",
+                http_status=status,
+                extra=extra,
+            )
         raise ApiChangedError(
             f"Naturgy returned HTTP {status}; the API may have changed", http_status=status
         )
@@ -184,16 +193,30 @@ class OmegaClient:
             raise AuthError(
                 "the session expired or was revoked; run `naturgy auth login`", code=text
             )
-        if text == "CG09":
-            raise AuthError("Naturgy rejected the NIF or password", code=text)
-        if text == "CG10":
-            raise AuthError(
-                "the password has expired; change it in the Naturgy web app", code=text
-            )
         if text == "CG08":
             raise BlockedError(
                 "too many sign-in attempts; wait before retrying", code=text
             )
+        if text in ("CG09", "PS04"):
+            raise LoginError("the NIF or password is not valid", code=text)
+        if text == "PS01":
+            raise LoginError(
+                "Naturgy does not recognize that user; check the NIF/NIE (with its letter)",
+                code=text,
+            )
+        if text == "CG10":
+            raise LoginError(
+                "the password has expired; change it in the Naturgy web app", code=text
+            )
+        if text == "CG15":
+            raise LoginError(
+                "the account is not active or needs attention; check the Naturgy web app",
+                code=text,
+            )
+        if text in ("CG04", "CG07", "CG11", "PS02", "PS03", "PS05", "PS06"):
+            raise LoginError(f"Naturgy refused the sign-in (code {text})", code=text)
+        if text.startswith("PS"):
+            raise LoginError(f"Naturgy refused the sign-in (code {text})", code=text)
         if text == "0004" and "reclamaci" in str(message or "").lower():
             raise ClaimAlreadyOpenError(code=text)
         if text == "1024":
@@ -212,29 +235,45 @@ class OmegaClient:
     # ------------------------------------------------------------------ auth
 
     def login(self, nif: str, password: str) -> TokenSet:
-        data = self.request(
-            "POST",
-            "authentication",
-            json={"user": nif, "password": password},
-            auth=False,
-        )
+        user = normalize_user(nif)
+        secret = normalize_password(password)
+        if not user:
+            raise UsageError("the NIF/NIE cannot be empty")
+        if not secret:
+            raise UsageError("the password cannot be empty")
+        try:
+            data = self.request(
+                "POST",
+                "authentication",
+                json={"user": user, "password": secret},
+                auth=False,
+            )
+        except UsageError as exc:
+            # A 400 from /authentication is opaque; give the sign-in a clearer message while
+            # keeping the safe response keys for debugging.
+            raise LoginError(
+                "Naturgy rejected the sign-in request; check the NIF/NIE (with its letter) and password",
+                http_status=exc.http_status,
+                code=exc.code,
+                extra=exc.extra,
+            ) from exc
         if not isinstance(data, dict):
             raise ApiChangedError("Naturgy's sign-in response was not a JSON object")
         auth = data.get("authResponse") if isinstance(data.get("authResponse"), dict) else data
-        user = auth.get("user") if isinstance(auth.get("user"), dict) else data.get("user")
+        user_info = auth.get("user") if isinstance(auth.get("user"), dict) else data.get("user")
         token = auth.get("token") or data.get("token")
         id_token = auth.get("idToken") or auth.get("id_token") or data.get("idToken")
         refresh_token = (
             auth.get("refreshToken") or auth.get("refresh_token") or data.get("refreshToken")
         )
-        if not isinstance(user, dict) or not isinstance(token, str) or not token.strip():
+        if not isinstance(user_info, dict) or not isinstance(token, str) or not token.strip():
             raise ApiChangedError("Naturgy's sign-in response did not contain a session")
         tokens = TokenSet(
             token=token.strip(),
             id_token=id_token.strip() if isinstance(id_token, str) else None,
             refresh_token=refresh_token.strip() if isinstance(refresh_token, str) else None,
-            user=user,
-            nif=nif,
+            user=user_info,
+            nif=user,
             trading_company=config.DEFAULT_TRADING_COMPANY,
             origin=self.origin,
         )
@@ -328,3 +367,13 @@ def _str(value: Any) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def normalize_user(value: str) -> str:
+    """The web app's user transform: remove whitespace, dots and hyphens, then uppercase."""
+    return re.sub(r"[\s.\-]+", "", value or "").upper()
+
+
+def normalize_password(value: str) -> str:
+    """The web app removes literal spaces from the password before sending it."""
+    return (value or "").replace(" ", "")

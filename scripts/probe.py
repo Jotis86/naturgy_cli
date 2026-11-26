@@ -119,6 +119,18 @@ def _extract(data: Any, *keys: str) -> list[Any]:
     return []
 
 
+def _error_payload(error: NaturgyError) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "type": error.error_type,
+        "code": error.code,
+        "http_status": error.http_status,
+        "message": error.message,
+    }
+    if "response_keys" in error.extra:
+        payload["response_keys"] = error.extra["response_keys"]
+    return {"error": payload}
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Read-only Naturgy API shape probe.")
     parser.add_argument(
@@ -164,18 +176,7 @@ def main(argv: list[str] | None = None) -> int:
             client = OmegaClient()
             tokens = None
         except NaturgyError as error:
-            print(
-                json.dumps(
-                    {
-                        "error": {
-                            "type": error.error_type,
-                            "code": error.code,
-                            "http_status": error.http_status,
-                        }
-                    }
-                ),
-                file=sys.stderr,
-            )
+            print(json.dumps(_error_payload(error)), file=sys.stderr)
             return error.exit_code
 
     if tokens is None:
@@ -189,18 +190,7 @@ def main(argv: list[str] | None = None) -> int:
             tokens = client.login(nif, password)
             info = client.get_client_info()
         except NaturgyError as error:
-            print(
-                json.dumps(
-                    {
-                        "error": {
-                            "type": error.error_type,
-                            "code": error.code,
-                            "http_status": error.http_status,
-                        }
-                    }
-                ),
-                file=sys.stderr,
-            )
+            print(json.dumps(_error_payload(error)), file=sys.stderr)
             return error.exit_code
         if args.save_tokens:
             with store.lock():
@@ -220,11 +210,14 @@ def main(argv: list[str] | None = None) -> int:
             try:
                 data = call()
             except NaturgyError as error:
-                errors[name] = {
+                entry: dict[str, Any] = {
                     "type": error.error_type,
                     "code": error.code,
                     "http_status": error.http_status,
                 }
+                if "response_keys" in error.extra:
+                    entry["response_keys"] = error.extra["response_keys"]
+                errors[name] = entry
                 return None
             endpoints[name] = {"shape": shape(data)}
             return data
@@ -353,18 +346,7 @@ def main(argv: list[str] | None = None) -> int:
         summary["endpoints_ok"] = len(endpoints)
         summary["endpoints_failed"] = len(errors)
     except NaturgyError as error:
-        print(
-            json.dumps(
-                {
-                    "error": {
-                        "type": error.error_type,
-                        "code": error.code,
-                        "http_status": error.http_status,
-                    }
-                }
-            ),
-            file=sys.stderr,
-        )
+        print(json.dumps(_error_payload(error)), file=sys.stderr)
         return error.exit_code
     finally:
         client.close()

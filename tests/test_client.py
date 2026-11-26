@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import httpx
 import pytest
 
@@ -9,6 +11,7 @@ from naturgy.errors import (
     AuthError,
     BlockedError,
     ClaimAlreadyOpenError,
+    LoginError,
     UpstreamUnavailableError,
 )
 from naturgy.models import TokenSet
@@ -71,15 +74,34 @@ def test_invalid_token_json_is_auth_error():
         client.request("GET", "clients")
 
 
-def test_cg09_is_auth_error_with_code():
+def test_cg09_is_login_error_with_code():
     client = make_client(
         lambda request: response(
             request, json={"result": {"codResult": "CG09", "msgResult": "no"}}
         )
     )
-    with pytest.raises(AuthError) as info:
+    with pytest.raises(LoginError) as info:
         client.request("POST", "authentication", auth=False)
     assert info.value.code == "CG09"
+
+
+def test_ps01_is_unknown_user_login_error():
+    client = make_client(
+        lambda request: response(request, json={"result": {"codResult": "PS01"}})
+    )
+    with pytest.raises(LoginError) as info:
+        client.request("POST", "authentication", auth=False)
+    assert info.value.code == "PS01"
+    assert "does not recognize" in info.value.message
+
+
+def test_ps04_is_login_error():
+    client = make_client(
+        lambda request: response(request, json={"result": {"codResult": "PS04"}})
+    )
+    with pytest.raises(LoginError) as info:
+        client.request("POST", "authentication", auth=False)
+    assert info.value.code == "PS04"
 
 
 def test_cg14_is_auth_error():
@@ -133,6 +155,40 @@ def test_login_success():
     assert tokens.id_token == "id"
     assert tokens.refresh_token == "refresh"
     assert tokens.user["clientCode"] == "00000000T"
+
+
+def test_login_normalizes_user_and_password_like_the_web_app():
+    captured: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(json.loads(request.content))
+        return response(
+            request,
+            json={
+                "authResponse": {
+                    "user": {"clientCode": "12345678Z"},
+                    "token": "access",
+                }
+            },
+        )
+
+    client = make_client(handler)
+    tokens = client.login(" 12.345.678-z ", " pass word ")
+    assert captured["user"] == "12345678Z"
+    assert captured["password"] == "password"
+    assert tokens.nif == "12345678Z"
+
+
+def test_login_400_is_login_error_with_safe_keys():
+    client = make_client(
+        lambda request: response(
+            request, status=400, json={"message": "bad request", "field": "password"}
+        )
+    )
+    with pytest.raises(LoginError) as info:
+        client.login("12345678Z", "wrong")
+    assert info.value.http_status == 400
+    assert info.value.extra["response_keys"] == ["field", "message"]
 
 
 def test_login_without_session_is_api_changed():

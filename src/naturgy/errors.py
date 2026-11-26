@@ -65,6 +65,16 @@ class AuthError(NaturgyError):
         super().__init__(message, **kwargs)
 
 
+class LoginError(NaturgyError):
+    error_type = "login_failed"
+    exit_code = EXIT_AUTH
+
+    def __init__(
+        self, message: str = "Naturgy rejected the sign-in; check the NIF/NIE and password", **kwargs: Any
+    ) -> None:
+        super().__init__(message, **kwargs)
+
+
 class AccessDeniedError(NaturgyError):
     error_type = "access_denied"
     exit_code = EXIT_AUTH
