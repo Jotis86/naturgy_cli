@@ -36,7 +36,7 @@ from .errors import (
 from .models import TokenSet
 from .tokens import FileTokenStore
 
-ACTIVE_PRODUCT_STATUSES = {"03", "04", "05", "06", "07", "09", "17", "18", "22", "23"}
+ACTIVE_PRODUCT_STATUSES = {"02", "03", "04", "05", "06", "07", "09", "17", "18", "22", "23"}
 CONSUMPTION_FAMILIES = {"luz", "gas", "solar", "recarga"}
 SOLAR_FAMILY_BY_PRODUCT_CODE = {"FV001": "1", "S0012": "2"}
 
@@ -70,8 +70,26 @@ def run_with_client(
         )
     client = OmegaClient(tokens, language=language)
     try:
-        client.get_client_info()
-        return operation(client, tokens)
+        try:
+            changed = client.ensure_identity()
+        except UsageError as exc:
+            raise UpstreamUnavailableError(
+                "Naturgy rejected the client identity request; try again later",
+                http_status=exc.http_status,
+                code=exc.code,
+            ) from exc
+        if changed and client.tokens is not None:
+            with store.lock():
+                store.save(client.tokens)
+        try:
+            client.get_client_info()
+        except UsageError as exc:
+            raise UpstreamUnavailableError(
+                "Naturgy rejected the client profile request; try again later",
+                http_status=exc.http_status,
+                code=exc.code,
+            ) from exc
+        return operation(client, client.tokens or tokens)
     finally:
         client.close()
 
@@ -239,12 +257,24 @@ def _normalize_product(raw: dict[str, Any], account: dict[str, Any]) -> dict[str
     product_type = _dict(raw.get("productType"))
     tech = _dict(raw.get("techData"))
     family = _text(product_type.get("productTypeFamily")) or _text(tech.get("productTypeFamily"))
-    status = _text(product_type.get("productStatus")) or _text(raw.get("status"))
+    status = (
+        _text(product_type.get("productStatus"))
+        or _text(raw.get("contractStatus"))
+        or _text(raw.get("status"))
+    )
+    active_flag = raw.get("isActive")
+    if active_flag is not None:
+        is_active = _bool(active_flag)
+    else:
+        is_active = status in ACTIVE_PRODUCT_STATUSES if status else None
     powers = {
         key: _num(tech.get(key))
         for key in ("powerPlain", "powerValley", "powerP3", "powerP4", "powerP5", "powerP6")
         if tech.get(key) is not None
     }
+    for key in ("p1", "p2", "p3", "p4", "p5", "p6"):
+        if tech.get(key) is not None:
+            powers[key] = _num(tech.get(key))
     return {
         "contract_id": _text(raw.get("contractId")),
         "contract_number": _text(raw.get("contractNumber")),
@@ -255,7 +285,7 @@ def _normalize_product(raw: dict[str, Any], account: dict[str, Any]) -> dict[str
         "product_code": _text(product_type.get("productCode")),
         "sva_family": _text(product_type.get("svaFamily")),
         "status": status,
-        "is_active": status in ACTIVE_PRODUCT_STATUSES if status else None,
+        "is_active": is_active,
         "rate": _text(tech.get("rate")),
         "cups": _text(tech.get("cups")),
         "powers": powers or None,
@@ -417,7 +447,9 @@ def _normalize_invoice(
         "status": _text(raw.get("status")),
         "issued_date": _text(raw.get("issuedDate")),
         "billing_date": _text(raw.get("billingDate")),
-        "period_start": _text(raw.get("periodStart")) or _text(raw.get("startDate")),
+        "period_start": _text(raw.get("periodFrom"))
+        or _text(raw.get("periodStart"))
+        or _text(raw.get("startDate")),
         "period_end": _text(raw.get("periodEnd")) or _text(raw.get("endDate")),
         "amount": amount,
         "pending_amount": pending,
@@ -774,40 +806,77 @@ def _extract_readings(data: Any) -> list[Any]:
 
 
 def _normalize_reading(raw: dict[str, Any], *, raw_output: bool = False) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "contract_number": _text(raw.get("contractNumber")),
+        "product_family": _text(raw.get("productTypeFamily")),
+        "invoice_id": _text(raw.get("invoiceId")),
+        "last_active_date": _text(raw.get("lastActiveDate")),
+        "cups": _text(_dict(raw.get("agentInfo")).get("cups")),
+        "items": _reading_items(raw),
+    }
+    if raw_output:
+        result["source"] = raw
+    return result
+
+
+def _reading_items(raw: dict[str, Any]) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
+    # Older shape: readingItem -> readingDetailList -> values.
     for reading in _as_list(raw.get("readingItem")):
         reading = _dict(reading)
         reading_date = _text(reading.get("readingItemDate"))
         reading_type = _text(reading.get("typeItem"))
         counter = reading.get("counterItem")
         for detail in _as_list(reading.get("readingDetailList")):
-            detail = _dict(detail)
-            magnitude = _text(detail.get("magnitude"))
-            for value in _as_list(detail.get("values")):
-                value = _dict(value)
-                items.append(
-                    {
-                        "date": _text(value.get("readingDate")) or reading_date,
-                        "type": reading_type,
-                        "counter": counter,
-                        "magnitude": magnitude,
-                        "value": _num(
-                            value.get("value")
-                            or value.get("readingValue")
-                            or value.get("counter")
-                        ),
-                    }
-                )
-    result: dict[str, Any] = {
-        "contract_number": _text(raw.get("contractNumber")),
-        "product_family": _text(raw.get("productTypeFamily")),
-        "invoice_id": _text(raw.get("invoiceId")),
-        "last_active_date": _text(raw.get("lastActiveDate")),
-        "items": items,
-    }
-    if raw_output:
-        result["source"] = raw
-    return result
+            _append_reading_detail(items, detail, reading_date, reading_type, counter)
+    # Current shape: readingDetailList at the top level.
+    for detail in _flatten(raw.get("readingDetailList")):
+        _append_reading_detail(items, detail, _text(raw.get("readingDate")), None, None)
+    return items
+
+
+def _append_reading_detail(
+    items: list[dict[str, Any]],
+    detail: Any,
+    fallback_date: str | None,
+    reading_type: str | None,
+    counter: Any,
+) -> None:
+    detail = _dict(detail)
+    if not detail:
+        return
+    magnitude = _text(detail.get("magnitude"))
+    values = _as_list(detail.get("values"))
+    if values:
+        for value in values:
+            value = _dict(value)
+            items.append(
+                {
+                    "date": _text(value.get("readingDate")) or fallback_date,
+                    "type": reading_type or _text(value.get("type")),
+                    "counter": counter or value.get("counter"),
+                    "magnitude": magnitude,
+                    "value": _num(
+                        value.get("value")
+                        or value.get("readingValue")
+                        or value.get("counter")
+                    ),
+                }
+            )
+        return
+    items.append(
+        {
+            "date": _text(detail.get("readingDate")) or fallback_date,
+            "type": reading_type or _text(detail.get("type")),
+            "counter": counter or detail.get("counter"),
+            "magnitude": magnitude,
+            "value": _num(
+                detail.get("value")
+                or detail.get("readingValue")
+                or detail.get("counter")
+            ),
+        }
+    )
 
 
 # ---------------------------------------------------------------------- debt
@@ -930,12 +999,17 @@ def _normalize_case(raw: dict[str, Any], *, raw_output: bool = False) -> dict[st
         "case_id": _text(raw.get("caseId")),
         "case_code": _text(raw.get("caseCode")),
         "type": _text(raw.get("typeId")) or _text(raw.get("managementType")),
+        "type_label": _text(raw.get("type")),
         "state": _text(raw.get("state")) or _text(raw.get("status")),
+        "step": _text(raw.get("step")),
         "sub_step": _text(raw.get("subStep")),
+        "channel": _text(raw.get("channel")),
         "contract_id": _text(raw.get("contractId")),
         "service_account_id": _text(raw.get("serviceAccountId")),
         "billing_account_id": _text(raw.get("billingAccountId")),
         "invoice_id": _text(raw.get("invoiceId")),
+        "start_date": _text(raw.get("startDate")),
+        "end_date": _text(raw.get("endDate")),
         "created_at": _text(raw.get("createdDate"))
         or _text(raw.get("createdAt"))
         or _text(raw.get("fechaAlta")),

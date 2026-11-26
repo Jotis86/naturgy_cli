@@ -117,6 +117,21 @@ def test_normalize_supply_and_mask_iban():
     assert supply["billing_accounts"][0]["iban_masked"] == "ES12 **** **** 9012"
 
 
+def test_product_uses_is_active_and_contract_status():
+    raw = {
+        "contractId": "CT1",
+        "contractNumber": "CN1",
+        "contractStatus": "02",
+        "isActive": False,
+        "productType": {"productTypeFamily": "luz", "productStatus": "02"},
+        "techData": {"p1": 4.6, "p2": 4.6, "cups": "ES1"},
+    }
+    product = api._normalize_product(raw, {"billingAccountId": "BA1"})
+    assert product["status"] == "02"
+    assert product["is_active"] is False
+    assert product["powers"] == {"p1": 4.6, "p2": 4.6}
+
+
 def test_invoices_use_billing_ref_and_prefer_pending():
     duplicate = dict(RAW_INVOICE, pendingAmount=12.5)
     client = FakeClient(invoice_responses({"InvoicesPDS": [RAW_INVOICE, duplicate]}))
@@ -137,6 +152,33 @@ def test_invoice_of_another_family_is_filtered():
     client = FakeClient(invoice_responses({"InvoicesPDS": [gas]}))
     result = api.get_invoices(client, supplies())
     assert result["count"] == 0
+
+
+def test_invoice_uses_period_from():
+    raw = dict(RAW_INVOICE, periodFrom="2026-09-01", periodEnd="2026-09-30")
+    invoice = api._normalize_invoice(
+        raw,
+        service_account_id="SA1",
+        billing_account_id="BA1",
+        ref_num="REF1",
+    )
+    assert invoice["period_start"] == "2026-09-01"
+    assert invoice["period_end"] == "2026-09-30"
+
+
+def test_reading_with_null_detail_list_does_not_fail():
+    reading = api._normalize_reading(
+        {
+            "agentInfo": {"cups": "ES1"},
+            "invoiceId": "INV1",
+            "productTypeFamily": "luz",
+            "readingDetailList": None,
+        }
+    )
+    assert reading["invoice_id"] == "INV1"
+    assert reading["product_family"] == "luz"
+    assert reading["cups"] == "ES1"
+    assert reading["items"] == []
 
 
 def test_invoice_filename_is_safe():

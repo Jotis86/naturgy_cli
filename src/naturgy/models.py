@@ -21,6 +21,8 @@ class TokenSet(BaseModel):
     refresh_token: str | None = None
     user: dict[str, Any] = Field(default_factory=dict)
     nif: str | None = None
+    account_id: str | None = None
+    contact_id: str | None = None
     trading_company: str = "newco"
     origin: str = "AC"
     saved_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
@@ -69,12 +71,20 @@ class TokenSet(BaseModel):
             }
 
         saved_at = _parse_datetime(data.get("savedAt") or data.get("saved_at")) or datetime.now(UTC)
+        account_id = (
+            _first_str(data, "accountId", "account_id")
+            or _first_str(user, "accountId")
+            or _first_str(user, "clientId")
+        )
+        contact_id = _first_str(data, "contactId", "contact_id") or _first_str(user, "contactId")
         return cls(
             token=token,
             id_token=id_token,
             refresh_token=refresh_token,
             user=user,
             nif=_first_str(data, "nif", "docNumber", "documentNumber"),
+            account_id=account_id,
+            contact_id=contact_id,
             trading_company=_first_str(data, "tradingCompany", "trading_company") or "newco",
             origin=_first_str(data, "origin") or "AC",
             saved_at=saved_at,
@@ -86,6 +96,8 @@ class TokenSet(BaseModel):
         return {
             "client_code": user.get("clientCode") or self.nif,
             "client_id": user.get("clientId"),
+            "account_id": self.account_id or user.get("clientId"),
+            "contact_id": self.contact_id or user.get("contactId"),
             "user_id": user.get("userId"),
             "role_type_id": user.get("roleTypeId"),
             "nif": self.nif,

@@ -15,9 +15,7 @@ from typing import Any
 from .client import OmegaClient, normalize_password, normalize_user
 from .errors import (
     AuthError,
-    BlockedError,
     NaturgyError,
-    UpstreamUnavailableError,
     UsageError,
 )
 from .models import TokenSet
@@ -43,13 +41,23 @@ def login(
             tokens.nif = nif
             store.save(tokens)
             try:
+                ids = client.fetch_identity()
+                tokens.account_id = ids.get("account_id")
+                tokens.contact_id = ids.get("contact_id")
+                store.save(tokens)
+            except AuthError:
+                store.delete()
+                raise
+            except NaturgyError:
+                warning = "signed in, but the client identity could not be read yet"
+            try:
                 info = client.get_client_info()
             except AuthError:
                 store.delete()
                 raise
-            except (BlockedError, UpstreamUnavailableError):
+            except NaturgyError:
                 info = None
-                warning = "signed in, but the client profile could not be read yet"
+                warning = warning or "signed in, but the client profile could not be read yet"
             if info:
                 _merge_client_info(tokens, info)
                 store.save(tokens)
@@ -79,11 +87,14 @@ def check(store: FileTokenStore) -> tuple[dict[str, Any], bool]:
         raise AuthError()
     client = OmegaClient(tokens)
     try:
+        client.ensure_identity()
         info = client.get_client_info()
         payload["remote"] = {
             "valid": True,
             "client_code": info.get("clientCode"),
             "client_id": info.get("clientId"),
+            "account_id": tokens.account_id,
+            "contact_id": tokens.contact_id,
         }
         return payload, True
     except AuthError:
@@ -148,10 +159,21 @@ def _merge_client_info(tokens: TokenSet, info: dict[str, Any]) -> None:
     user = dict(tokens.user)
     if info.get("clientId"):
         user["clientId"] = info["clientId"]
+        if not tokens.account_id:
+            tokens.account_id = info["clientId"]
     if info.get("docNumber"):
         user["docNumber"] = info["docNumber"]
     if info.get("clientCode") and not user.get("clientCode"):
         user["clientCode"] = info["clientCode"]
+    if not tokens.contact_id:
+        for contact in info.get("contacts") or []:
+            if isinstance(contact, dict) and (
+                contact.get("isPreferred") or contact.get("isHolder")
+            ):
+                contact_id = contact.get("contactId")
+                if isinstance(contact_id, str) and contact_id:
+                    tokens.contact_id = contact_id
+                    break
     tokens.user = user
 
 

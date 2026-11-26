@@ -58,6 +58,27 @@ def test_browser_export_is_accepted(tmp_path):
     assert tokens.user["roleTypeId"] == "newcoClient"
 
 
+def test_browser_export_maps_client_id_to_account_id(tmp_path):
+    path = tmp_path / "browser.json"
+    path.write_text(
+        json.dumps(
+            {
+                "token": "access",
+                "idToken": "id",
+                "refreshToken": "refresh",
+                "userId": "U1",
+                "clientCode": "00000000T",
+                "clientId": "ACC1",
+                "roleTypeId": "newcoClient",
+            }
+        ),
+        encoding="utf-8",
+    )
+    tokens = FileTokenStore(path).load()
+    assert tokens is not None
+    assert tokens.account_id == "ACC1"
+
+
 def test_missing_token_file_returns_none(tmp_path):
     assert FileTokenStore(tmp_path / "missing.json").load() is None
 

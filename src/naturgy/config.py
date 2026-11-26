@@ -7,7 +7,7 @@ from pathlib import Path
 
 TOKENS_FILE_ENV = "NATURGY_TOKENS_FILE"
 
-OMEGA_URL = os.environ.get("NATURGY_OMEGA_URL", "https://omegav2.naturgy.es")
+OMEGA_URL = os.environ.get("NATURGY_OMEGA_URL", "https://omega.naturgy.es")
 BASE_URL = os.environ.get(
     "NATURGY_BASE_URL", "https://api.naturgy.com/ntgy-fua-e-fua/fua/api"
 ).rstrip("/")

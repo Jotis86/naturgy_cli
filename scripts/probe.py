@@ -167,8 +167,11 @@ def main(argv: list[str] | None = None) -> int:
             if saved is not None:
                 client.close()
                 client = OmegaClient(saved)
+                client.ensure_identity()
                 info = client.get_client_info()
-                tokens = saved
+                tokens = client.tokens or saved
+                with store.lock():
+                    store.save(tokens)
                 print(f"Reusing the session at {store.path}", file=sys.stderr)
         except AuthError:
             print("The saved session is not usable; asking for credentials.", file=sys.stderr)
@@ -188,6 +191,8 @@ def main(argv: list[str] | None = None) -> int:
         print("Signing in...", file=sys.stderr)
         try:
             tokens = client.login(nif, password)
+            client.ensure_identity()
+            tokens = client.tokens or tokens
             info = client.get_client_info()
         except NaturgyError as error:
             print(json.dumps(_error_payload(error)), file=sys.stderr)
@@ -265,6 +270,18 @@ def main(argv: list[str] | None = None) -> int:
                 invoices_by_account.append(data or {})
 
                 first_product = products[0] if products else {}
+                for candidate in products:
+                    candidate_tech = _dict(candidate.get("techData"))
+                    candidate_family = _text(
+                        _dict(candidate.get("productType")).get("productTypeFamily")
+                    )
+                    if (
+                        candidate_family in CONSUMPTION_FAMILIES
+                        and candidate_tech.get("cups")
+                        and candidate.get("contractNumber")
+                    ):
+                        first_product = candidate
+                        break
                 tech = _dict(first_product.get("techData"))
                 family = _text(_dict(first_product.get("productType")).get("productTypeFamily"))
                 if family in CONSUMPTION_FAMILIES and tech.get("cups") and first_product.get("contractNumber"):

@@ -8,6 +8,7 @@ is mandatory and an empty 200 is reported as `blocked` instead of as a parse err
 from __future__ import annotations
 
 import re
+import secrets
 import threading
 import time
 from typing import Any, Self
@@ -78,6 +79,7 @@ class OmegaClient:
     ) -> Any:
         self._pace()
         headers = self._auth_headers() if auth else {}
+        headers["traceparent"] = _traceparent()
         kwargs: dict[str, Any] = {"params": params, "headers": headers}
         if json is not _MISSING:
             kwargs["json"] = json
@@ -300,7 +302,12 @@ class OmegaClient:
             or _str(info.get("clientCode"))
             or login_code
         )
-        client_id = _str(info.get("clientId")) or _str(user.get("clientId"))
+        client_id = (
+            _str(self.tokens.account_id)
+            or _str(info.get("clientId"))
+            or _str(user.get("clientId"))
+        )
+        contact_id = _str(self.tokens.contact_id) or _str(user.get("contactId"))
         headers: dict[str, str] = {
             "x-access-token": self.tokens.token,
             "x-user-role": role,
@@ -317,6 +324,8 @@ class OmegaClient:
             headers["x-client-doc-number"] = login_code
         if client_id:
             headers["x-client-id"] = client_id
+        if contact_id:
+            headers["x-contact-id"] = contact_id
         if role.endswith("Agent"):
             user_id = _str(user.get("userId"))
             if user_id:
@@ -338,6 +347,32 @@ class OmegaClient:
             raise ApiChangedError("Naturgy's client response did not contain a client")
         self._client_info = client
         return client
+
+    def fetch_identity(self) -> dict[str, str | None]:
+        """Read the account/contact ids the data endpoints need from /authorization."""
+        if not self.tokens:
+            raise AuthError()
+        data = self.request("GET", "authorization")
+        entries = data.get("authorization") if isinstance(data, dict) else None
+        if not isinstance(entries, list) or not entries or not isinstance(entries[0], dict):
+            raise ApiChangedError("Naturgy's authorization response did not contain a client")
+        entry = entries[0]
+        account = _str(entry.get("accountid")) or _str(entry.get("accountId"))
+        contact = _str(entry.get("contactid")) or _str(entry.get("contactId"))
+        if not account:
+            raise ApiChangedError("Naturgy's authorization response did not contain an account id")
+        self.tokens.account_id = account
+        self.tokens.contact_id = contact
+        return {"account_id": account, "contact_id": contact}
+
+    def ensure_identity(self) -> bool:
+        """Fetch the ids once when a session (e.g. a browser export) does not carry them."""
+        if not self.tokens:
+            raise AuthError()
+        if self.tokens.account_id and self.tokens.contact_id:
+            return False
+        self.fetch_identity()
+        return True
 
     def authorization(self) -> Any:
         return self.request("GET", "authorization")
@@ -377,3 +412,8 @@ def normalize_user(value: str) -> str:
 def normalize_password(value: str) -> str:
     """The web app removes literal spaces from the password before sending it."""
     return (value or "").replace(" ", "")
+
+
+def _traceparent() -> str:
+    """A valid W3C trace context. The API answers 400 Bad request without one."""
+    return f"00-{secrets.token_hex(16)}-{secrets.token_hex(8)}-01"

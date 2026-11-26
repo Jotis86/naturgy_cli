@@ -266,9 +266,12 @@ automatic request is the initial `/clients` lookup that scopes the session.
 
 - The API is undocumented and may change without notice. `--raw` and `scripts/probe.py` exist to
   make the mapping easy to update.
+- The API requires a W3C `traceparent` header and the account/contact ids that `/authorization`
+  returns; the CLI generates the header and fetches the ids after login. A `403`, `429` or an empty
+  `200` is still reported as `blocked` (exit 5).
 - There is no token refresh; see above.
-- The API sits behind a bot-protection layer that can return empty `200` responses. The CLI sends
-  browser-like headers and reports that case as `blocked` (exit 5), never as empty data.
+- `readings` passes through what Naturgy returns. For some accounts `readingDetailList` is `null`,
+  so `items` is an empty list; that is the API's answer, not a CLI error.
 - The client document number and tokens are sensitive. The token file is `0600` and values are
   never printed. Output may contain personal data (names, addresses, CUPS, invoice ids); do not
   commit it. `--raw` may include the full IBAN; the normalized output masks it.

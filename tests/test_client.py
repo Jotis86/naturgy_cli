@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 
 import httpx
 import pytest
@@ -36,6 +37,8 @@ def test_auth_headers_match_the_web_app():
         id_token="id",
         user={"clientCode": "00000000T", "clientId": "C1", "roleTypeId": "newcoClient"},
         nif="00000000T",
+        account_id="ACC1",
+        contact_id="CON1",
     )
     client = make_client(lambda request: response(request, json={}), tokens=tokens)
     client._client_info = {"docNumber": "00000000T", "clientId": "C1"}
@@ -47,8 +50,56 @@ def test_auth_headers_match_the_web_app():
     assert headers["x-client-code"] == "00000000T"
     assert headers["x-client-doc-number"] == "00000000T"
     assert headers["nif"] == "00000000T"
-    assert headers["x-client-id"] == "C1"
+    assert headers["x-client-id"] == "ACC1"
+    assert headers["x-contact-id"] == "CON1"
     assert headers["x-language"] == "es"
+
+
+def test_traceparent_header_is_valid():
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(request.headers)
+        return response(request, json={})
+
+    client = make_client(handler)
+    client.request("GET", "clients")
+    assert re.fullmatch(
+        r"00-[0-9a-f]{32}-[0-9a-f]{16}-01", captured["traceparent"]
+    )
+
+
+def test_fetch_identity_sets_account_and_contact():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path.endswith("/authorization")
+        return response(
+            request,
+            json={
+                "authorization": [
+                    {"accountid": "ACC1", "contactid": "CON1", "docnumber": "00000000T"}
+                ]
+            },
+        )
+
+    client = make_client(handler)
+    result = client.fetch_identity()
+    assert result == {"account_id": "ACC1", "contact_id": "CON1"}
+    assert client.tokens
+    assert client.tokens.account_id == "ACC1"
+    assert client.tokens.contact_id == "CON1"
+    assert client.auth_headers()["x-client-id"] == "ACC1"
+    assert client.auth_headers()["x-contact-id"] == "CON1"
+
+
+def test_ensure_identity_skips_request_when_present():
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("should not request /authorization")
+
+    client = make_client(
+        handler,
+        tokens=TokenSet(token="x", account_id="ACC1", contact_id="CON1"),
+    )
+    assert client.ensure_identity() is False
 
 
 def test_base_headers_omit_origin_and_referer():
