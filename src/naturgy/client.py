@@ -76,10 +76,13 @@ class OmegaClient:
         json: Any = _MISSING,
         auth: bool = True,
         expect_json: bool = True,
+        extra_headers: dict[str, str] | None = None,
     ) -> Any:
         self._pace()
         headers = self._auth_headers() if auth else {}
         headers["traceparent"] = _traceparent()
+        if extra_headers:
+            headers.update(extra_headers)
         kwargs: dict[str, Any] = {"params": params, "headers": headers}
         if json is not _MISSING:
             kwargs["json"] = json

@@ -328,6 +328,27 @@ def main(argv: list[str] | None = None) -> int:
 
         record("GET /cases", lambda: client.request("GET", "cases"))
         record("GET /intents", lambda: client.request("GET", "intents"))
+        record("GET /balanceBattery", lambda: client.request("GET", "balanceBattery"))
+        record(
+            "GET /historyBattery",
+            lambda: client.request(
+                "GET",
+                "historyBattery",
+                extra_headers={"page": "1", "limit": "3"},
+            ),
+        )
+        record(
+            "GET /evolutionBalanceBattery",
+            lambda: client.request(
+                "GET",
+                "evolutionBalanceBattery",
+                params={"year": date.today().year},
+            ),
+        )
+        record(
+            "GET /assignmentBattery",
+            lambda: client.request("GET", "assignmentBattery"),
+        )
 
         first_invoice = next((item for item in first_invoices if isinstance(item, dict)), None)
         if first_invoice and first_invoice.get("invoiceId"):
@@ -404,4 +425,4 @@ if __name__ == "__main__":
         raise SystemExit(main())
     except KeyboardInterrupt:
         print("cancelled", file=sys.stderr)
-        raise SystemExit(2)
+        raise SystemExit(2) from None

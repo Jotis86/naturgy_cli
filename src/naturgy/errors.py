@@ -119,6 +119,18 @@ class ClaimAlreadyOpenError(NaturgyError):
         super().__init__(message, **kwargs)
 
 
+class ClaimCheckFailedError(NaturgyError):
+    error_type = "claim_check_failed"
+    exit_code = EXIT_UPSTREAM
+
+    def __init__(
+        self,
+        message: str = "could not check whether a claim is already open; nothing was sent",
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(message, **kwargs)
+
+
 class OutcomeUnknownError(NaturgyError):
     error_type = "outcome_unknown"
     exit_code = EXIT_UPSTREAM

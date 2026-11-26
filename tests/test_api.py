@@ -1,12 +1,21 @@
 from __future__ import annotations
 
 import base64
+import json
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from naturgy import api
-from naturgy.errors import ClaimAlreadyOpenError, UsageError
+from naturgy.errors import (
+    AuthError,
+    ClaimAlreadyOpenError,
+    ClaimCheckFailedError,
+    UpstreamUnavailableError,
+    UsageError,
+)
 from naturgy.models import TokenSet
+from naturgy.tokens import FileTokenStore
 
 RAW_SUPPLY = {
     "serviceAccountId": "SA1",
@@ -64,6 +73,12 @@ RAW_INVOICE = {
 }
 
 
+def make_jwt(claims: dict) -> str:
+    header = base64.urlsafe_b64encode(b'{"alg":"none"}').rstrip(b"=")
+    body = base64.urlsafe_b64encode(json.dumps(claims).encode()).rstrip(b"=")
+    return b".".join([header, body, b"signature"]).decode()
+
+
 class FakeClient:
     def __init__(self, responses, info=None):
         self.responses = responses
@@ -82,6 +97,8 @@ class FakeClient:
             value = self.responses.get(path)
         if value is None:
             raise AssertionError(f"unexpected request: {method} {path}")
+        if isinstance(value, Exception):
+            raise value
         if callable(value):
             return value(params, json)
         return value
@@ -130,6 +147,33 @@ def test_product_uses_is_active_and_contract_status():
     assert product["status"] == "02"
     assert product["is_active"] is False
     assert product["powers"] == {"p1": 4.6, "p2": 4.6}
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("1.234,56", 1234.56),
+        ("1,234.56", 1234.56),
+        ("1.234.567,89", 1234567.89),
+        ("1,234,567.89", 1234567.89),
+        ("1234,56", 1234.56),
+        ("1234.56", 1234.56),
+        ("-1.234,56", -1234.56),
+        ("0", 0.0),
+        ("", None),
+        (None, None),
+        (True, None),
+        ("n/a", None),
+    ],
+)
+def test_num_accepts_spanish_and_english_number_formats(raw, expected):
+    assert api._num(raw) == expected
+
+
+def test_num_keeps_the_legacy_meaning_of_a_single_separator():
+    # A single separator is ambiguous; keep the old behavior and document it here.
+    assert api._num("1.234") == 1.234
+    assert api._num("1,234") == 1.234
 
 
 def test_invoices_use_billing_ref_and_prefer_pending():
@@ -202,6 +246,13 @@ def test_decode_pdf():
     assert api._decode_pdf("data:application/pdf;base64," + base64.b64encode(payload).decode()) == payload
 
 
+def test_validate_attachments_rejects_an_unknown_suffix(tmp_path):
+    path = tmp_path / "note.txt"
+    path.write_text("not an attachment", encoding="utf-8")
+    with pytest.raises(UsageError):
+        api.validate_attachments([path])
+
+
 def test_claim_text_validation():
     assert api.claim_text("  hola\nmundo  ") == "hola\nmundo"
     with pytest.raises(UsageError):
@@ -252,6 +303,59 @@ def test_send_claim_success():
     assert result["case_id"] == "CASE1"
     assert result["case_code"] == "CODE1"
     assert result["invoice_id"] == "INV1"
+    assert result["open_claim_check"] == "ok"
+
+
+def test_send_claim_refuses_when_the_open_check_fails():
+    responses = invoice_responses()
+    responses[("GET", "cases")] = UpstreamUnavailableError("cases unavailable")
+    client = FakeClient(responses)
+    tokens = TokenSet(token="access", user={"clientCode": "00000000T"})
+    draft = api.prepare_claim(
+        client, tokens, "INV1", "No reconozco el cargo", supplies=supplies()
+    )
+    with pytest.raises(ClaimCheckFailedError) as info:
+        api.send_claim(client, draft)
+    assert info.value.extra["sent"] is False
+    assert not any(call["method"] == "POST" for call in client.calls)
+
+
+def test_send_claim_force_sends_when_the_open_check_fails():
+    responses = invoice_responses()
+    responses[("GET", "cases")] = UpstreamUnavailableError("cases unavailable")
+    responses[("POST", "cases")] = {"caseId": "CASE1", "caseCode": "CODE1"}
+    client = FakeClient(responses)
+    tokens = TokenSet(token="access", user={"clientCode": "00000000T"})
+    draft = api.prepare_claim(
+        client, tokens, "INV1", "No reconozco el cargo", supplies=supplies()
+    )
+    result = api.send_claim(client, draft, force=True)
+    assert result["case_id"] == "CASE1"
+    assert result["open_claim_check"] == "skipped"
+    assert any(call["method"] == "POST" for call in client.calls)
+
+
+def test_send_claim_force_does_not_bypass_a_confirmed_open_claim():
+    responses = invoice_responses()
+    responses[("GET", "cases")] = {
+        "cases": [
+            {
+                "typeId": "claimInvoice",
+                "state": "Abierto",
+                "invoiceId": "INV1",
+                "billingAccountId": "BA1",
+                "contractId": "CT1",
+            }
+        ]
+    }
+    client = FakeClient(responses)
+    tokens = TokenSet(token="access", user={"clientCode": "00000000T"})
+    draft = api.prepare_claim(
+        client, tokens, "INV1", "No reconozco el cargo", supplies=supplies()
+    )
+    with pytest.raises(ClaimAlreadyOpenError):
+        api.send_claim(client, draft, force=True)
+    assert not any(call["method"] == "POST" for call in client.calls)
 
 
 def test_send_claim_refuses_when_open():
@@ -308,3 +412,13 @@ def test_select_supplies():
     assert len(api.select_supplies(supplies(), "ES0000")) == 1
     with pytest.raises(UsageError):
         api.select_supplies(supplies(), "does-not-exist")
+
+
+def test_expired_session_fails_before_any_request(tmp_path):
+    store = FileTokenStore(tmp_path / "tokens.json")
+    expired = make_jwt({"exp": int((datetime.now(UTC) - timedelta(minutes=1)).timestamp())})
+    store.save(TokenSet(token=expired))
+    called = []
+    with pytest.raises(AuthError):
+        api.run_with_client(store, lambda client, tokens: called.append(True))
+    assert called == []

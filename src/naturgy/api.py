@@ -29,12 +29,13 @@ from .errors import (
     AuthError,
     BlockedError,
     ClaimAlreadyOpenError,
+    ClaimCheckFailedError,
     OutcomeUnknownError,
     UpstreamUnavailableError,
     UsageError,
 )
 from .models import TokenSet
-from .tokens import FileTokenStore
+from .tokens import FileTokenStore, token_status
 
 ACTIVE_PRODUCT_STATUSES = {"02", "03", "04", "05", "06", "07", "09", "17", "18", "22", "23"}
 CONSUMPTION_FAMILIES = {"luz", "gas", "solar", "recarga"}
@@ -52,6 +53,7 @@ CLAIM_REASONS: dict[str, tuple[str, str]] = {
     "billed-invoice": ("08", "factura ya cobrada"),
 }
 CLAIM_CLOSED_STATES = {"Cerrado", "Cerrada", "closed", "canceled", "cancelado", "Anulado", "KO"}
+BATTERY_HISTORY_MAX_LIMIT = 100
 
 
 # ---------------------------------------------------------------------- entry point
@@ -68,6 +70,11 @@ def run_with_client(
         raise AuthError(
             f"not signed in: no token file at {store.path}; run `naturgy auth login`"
         )
+    access = token_status(tokens)["access_token"]
+    if access.get("expired") is True:
+        expires = access.get("expires_at")
+        detail = f" at {expires}" if expires else ""
+        raise AuthError(f"the session expired{detail}; run `naturgy auth login`")
     client = OmegaClient(tokens, language=language)
     try:
         try:
@@ -1029,6 +1036,226 @@ def _normalize_case(raw: dict[str, Any], *, raw_output: bool = False) -> dict[st
     return result
 
 
+# ---------------------------------------------------------------------- battery
+
+
+def validate_battery_history(page: int, limit: int) -> None:
+    if page < 1:
+        raise UsageError("--page must be 1 or greater")
+    if limit < 1 or limit > BATTERY_HISTORY_MAX_LIMIT:
+        raise UsageError(f"--limit must be between 1 and {BATTERY_HISTORY_MAX_LIMIT}")
+
+
+def validate_battery_year(year: int | None) -> int:
+    selected = date.today().year if year is None else year
+    if selected < 1900 or selected > 2100:
+        raise UsageError("--year must be a four-digit year")
+    return selected
+
+
+def get_battery_status(
+    client: OmegaClient, *, raw: bool = False
+) -> dict[str, Any]:
+    data = client.request("GET", "balanceBattery")
+    if not isinstance(data, dict):
+        raise ApiChangedError("Naturgy's battery response was not a JSON object")
+    known = {"nif", "name", "current_total", "is_automatic"}
+    breakdown: list[dict[str, Any]] = []
+    for code, value in data.items():
+        if code in known or not isinstance(value, dict) or "total" not in value:
+            continue
+        breakdown.append(
+            {
+                "code": str(code),
+                "total": _num(value.get("total")),
+                "date_enabled": _text(value.get("date_enabled")),
+                "date_disabled": _text(value.get("date_disabled")),
+            }
+        )
+    date_enabled = _first(*(item["date_enabled"] for item in breakdown), default=None)
+    date_disabled = _first(*(item["date_disabled"] for item in breakdown), default=None)
+    balance = _num(data.get("current_total"))
+    if balance is None:
+        totals = [item["total"] for item in breakdown if item["total"] is not None]
+        balance = round(sum(totals), 2) if totals else None
+    result: dict[str, Any] = {
+        "balance": balance,
+        "currency": "EUR",
+        "is_active": _battery_active(date_enabled, date_disabled),
+        "is_automatic": _bool(data.get("is_automatic")),
+        "date_enabled": date_enabled,
+        "date_disabled": date_disabled,
+        "breakdown": breakdown,
+    }
+    if raw:
+        result["source"] = data
+    return result
+
+
+def get_battery_history(
+    client: OmegaClient,
+    *,
+    page: int = 1,
+    limit: int = 20,
+    supply: str | None = None,
+    raw: bool = False,
+) -> dict[str, Any]:
+    validate_battery_history(page, limit)
+    # /historyBattery paginates with request headers, not query parameters.
+    data = client.request(
+        "GET",
+        "historyBattery",
+        extra_headers={"page": str(page), "limit": str(limit)},
+    )
+    if not isinstance(data, dict):
+        raise ApiChangedError("Naturgy's battery history response was not a JSON object")
+    movements = [
+        _normalize_battery_movement(item)
+        for item in _as_list(data.get("data"))
+        if isinstance(item, dict)
+    ]
+    if supply:
+        movements = _filter_battery_items(
+            movements, supply, ("contract", "supply", "address"), required=False
+        )
+    result: dict[str, Any] = {
+        "movements": movements,
+        "count": len(movements),
+        "page": _int(data.get("currentPage")) or page,
+        "limit": limit,
+        "total_pages": _int(data.get("totalPages")) or 0,
+        "total_items": _int(data.get("totalItems")) or 0,
+    }
+    if raw:
+        result["source"] = data
+    return result
+
+
+def get_battery_evolution(
+    client: OmegaClient, year: int | None = None, *, raw: bool = False
+) -> dict[str, Any]:
+    selected = validate_battery_year(year)
+    data = client.request(
+        "GET", "evolutionBalanceBattery", params={"year": selected}
+    )
+    if not isinstance(data, dict):
+        raise ApiChangedError("Naturgy's battery evolution response was not a JSON object")
+    months: list[dict[str, Any]] = []
+    for key, value in data.items():
+        text = str(key)
+        if not text.isdigit():
+            continue
+        entries = [
+            {"origin": _text(item.get("origin")), "total": _num(item.get("total"))}
+            for item in _as_list(value)
+            if isinstance(item, dict)
+        ]
+        months.append({"month": f"{int(text):02d}", "entries": entries})
+    months.sort(key=lambda item: item["month"])
+    result: dict[str, Any] = {"year": selected, "months": months, "count": len(months)}
+    if raw:
+        result["source"] = data
+    return result
+
+
+def get_battery_assignments(
+    client: OmegaClient, *, supply: str | None = None, raw: bool = False
+) -> dict[str, Any]:
+    data = client.request("GET", "assignmentBattery")
+    if not isinstance(data, dict):
+        raise ApiChangedError("Naturgy's battery assignment response was not a JSON object")
+    reserves = [
+        _normalize_battery_assignment(item)
+        for item in _as_list(data.get("reserves"))
+        if isinstance(item, dict)
+    ]
+    if supply:
+        reserves = _filter_battery_items(
+            reserves, supply, ("contract", "supply", "address"), required=True
+        )
+    result: dict[str, Any] = {
+        "reserves": reserves,
+        "count": len(reserves),
+        "total": _num(data.get("total")),
+    }
+    if raw:
+        result["source"] = data
+    return result
+
+
+def _battery_active(
+    date_enabled: str | None, date_disabled: str | None
+) -> bool | None:
+    if not date_enabled:
+        return None
+    if not date_disabled:
+        return True
+    return _date_key(date_disabled) > date.today().isoformat()
+
+
+def _normalize_battery_movement(raw: dict[str, Any]) -> dict[str, Any]:
+    concept = _text(raw.get("concept"))
+    return {
+        "id": _text(raw.get("id")),
+        "concept": concept,
+        "kind": _battery_kind(concept),
+        "amount": _num(raw.get("quantity")),
+        "invoice_id": _text(raw.get("factnum")),
+        "contract": _text(raw.get("vkont")),
+        "supply": _text(raw.get("supply")),
+        "ally_id": _text(raw.get("allyId")),
+        "is_self_consumption": _bool(raw.get("is_self_consumption")),
+        "created_at": _text(raw.get("created_at")),
+        "accounting_date": _text(raw.get("accounting_date")),
+        "address": _text(raw.get("address")),
+    }
+
+
+def _battery_kind(concept: str | None) -> str | None:
+    text = (concept or "").casefold()
+    if "caduc" in text:
+        return "expired"
+    if "rectific" in text:
+        return "adjustment"
+    if "gasto" in text or "descarg" in text or "consum" in text:
+        return "discharge"
+    if "nuevo saldo" in text or "carg" in text or "abono" in text:
+        return "charge"
+    return None
+
+
+def _normalize_battery_assignment(raw: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": _text(raw.get("id")),
+        "contract": _text(raw.get("vkont")),
+        "supply": _text(raw.get("supply")),
+        "assigned": _num(raw.get("quantity")),
+        "enabled": _bool(raw.get("enabled")),
+        "supply_active": _bool(raw.get("supply_active")),
+        "created_at": _text(raw.get("created_at")),
+        "updated_at": _text(raw.get("updated_at")),
+        "address": _text(raw.get("address")),
+    }
+
+
+def _filter_battery_items(
+    items: list[dict[str, Any]],
+    selector: str,
+    keys: tuple[str, ...],
+    *,
+    required: bool,
+) -> list[dict[str, Any]]:
+    needle = selector.strip().casefold()
+    matches = [
+        item
+        for item in items
+        if any(needle in str(item.get(key) or "").casefold() for key in keys)
+    ]
+    if required and not matches:
+        raise UsageError(f"no battery item matches {selector!r}")
+    return matches
+
+
 # ---------------------------------------------------------------------- claims
 
 
@@ -1218,8 +1445,10 @@ def claim_body(draft: ClaimDraft) -> dict[str, Any]:
     return body
 
 
-def send_claim(client: OmegaClient, draft: ClaimDraft) -> dict[str, Any]:
-    _check_open_claim(client, draft)
+def send_claim(
+    client: OmegaClient, draft: ClaimDraft, *, force: bool = False
+) -> dict[str, Any]:
+    check = _check_open_claim(client, draft, force=force)
     try:
         data = client.request("POST", "cases", json=draft.payload)
     except (UpstreamUnavailableError, BlockedError) as exc:
@@ -1236,15 +1465,26 @@ def send_claim(client: OmegaClient, draft: ClaimDraft) -> dict[str, Any]:
         "case_code": case_code,
         "invoice_id": draft.invoice_id or None,
         "reason": draft.reason_code,
+        "open_claim_check": check,
         "sent_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
     }
 
 
-def _check_open_claim(client: OmegaClient, draft: ClaimDraft) -> None:
+def _check_open_claim(
+    client: OmegaClient, draft: ClaimDraft, *, force: bool = False
+) -> str:
     try:
         cases = get_cases(client)["cases"]
-    except (UpstreamUnavailableError, BlockedError):
-        return
+    except (UpstreamUnavailableError, BlockedError) as exc:
+        if force:
+            return "skipped"
+        raise ClaimCheckFailedError(
+            extra={
+                "sent": False,
+                "hint": "use --force to send the claim without this check",
+                "cause": exc.error_type,
+            }
+        ) from exc
     for case in cases:
         if case.get("type") != CLAIM_MANAGEMENT_TYPE:
             continue
@@ -1259,6 +1499,7 @@ def _check_open_claim(client: OmegaClient, draft: ClaimDraft) -> None:
         )
         if same_invoice or same_contract:
             raise ClaimAlreadyOpenError()
+    return "ok"
 
 
 def _find_raw_context(
@@ -1365,7 +1606,15 @@ def validate_attachments(paths: list[Path]) -> None:
         expanded = path.expanduser()
         if not expanded.is_file():
             raise UsageError(f"attachment not found: {expanded}")
-        total += expanded.stat().st_size
+        if expanded.suffix.casefold() not in config.CLAIM_ATTACHMENT_SUFFIXES:
+            raise UsageError(
+                "attachments must be PNG, JPEG or PDF: "
+                + ", ".join(config.CLAIM_ATTACHMENT_SUFFIXES)
+            )
+        size = expanded.stat().st_size
+        if size > config.CLAIM_MAX_ATTACHMENT_BYTES:
+            raise UsageError(f"{expanded.name} is larger than 2 MB")
+        total += size
     if total > config.CLAIM_MAX_TOTAL_ATTACHMENT_BYTES:
         raise UsageError("the attachments total more than 10 MB")
 
@@ -1425,14 +1674,27 @@ def _num(value: Any) -> float | None:
     text = str(value).strip()
     if not text:
         return None
-    if "," in text and "." in text:
-        text = text.replace(".", "").replace(",", ".")
-    elif "," in text:
-        text = text.replace(",", ".")
+    comma = text.rfind(",")
+    dot = text.rfind(".")
+    if comma >= 0 and dot >= 0:
+        # Whichever separator appears last is the decimal one; the other groups thousands.
+        if comma > dot:
+            text = text.replace(".", "").replace(",", ".")
+        else:
+            text = text.replace(",", "")
+    elif comma >= 0:
+        text = text.replace(",", "") if text.count(",") > 1 else text.replace(",", ".")
+    elif text.count(".") > 1:
+        text = text.replace(".", "")
     try:
         return float(text)
     except ValueError:
         return None
+
+
+def _int(value: Any) -> int | None:
+    number = _num(value)
+    return int(number) if number is not None else None
 
 
 def _bool(value: Any) -> bool:

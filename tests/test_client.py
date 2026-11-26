@@ -69,6 +69,20 @@ def test_traceparent_header_is_valid():
     )
 
 
+def test_extra_headers_are_sent():
+    captured: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(request.headers)
+        return response(request, json={})
+
+    client = make_client(handler)
+    client.request("GET", "clients", extra_headers={"page": "2", "limit": "10"})
+
+    assert captured["page"] == "2"
+    assert captured["limit"] == "10"
+
+
 def test_fetch_identity_sets_account_and_contact():
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path.endswith("/authorization")

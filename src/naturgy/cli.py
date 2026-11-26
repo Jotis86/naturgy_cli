@@ -35,8 +35,13 @@ app = typer.Typer(
     pretty_exceptions_enable=False,
 )
 invoices_app = typer.Typer(help="Invoices and invoice PDFs.", no_args_is_help=True)
+battery_app = typer.Typer(
+    help="Virtual battery (Batería Virtual): balance, movements and assignments.",
+    no_args_is_help=True,
+)
 auth_app = typer.Typer(help="Sign in, check the session and sign out.", no_args_is_help=True)
 app.add_typer(invoices_app, name="invoices")
+app.add_typer(battery_app, name="battery")
 app.add_typer(auth_app, name="auth")
 
 
@@ -72,6 +77,14 @@ def _emit(produce: Callable[[], Any]) -> Any:
     return payload
 
 
+def _check(action: Callable[[], Any]) -> Any:
+    """Run argument validation before any token or network work."""
+    try:
+        return action()
+    except NaturgyError as error:
+        _fail(error)
+
+
 def _run(
     ctx: typer.Context,
     operation: Callable[[Any, Any], Any],
@@ -87,6 +100,27 @@ def _run(
 def _supplies(client: Any, state: State) -> list[dict[str, Any]]:
     supplies = api.get_supplies(client)["supplies"]
     return api.select_supplies(supplies, state.supply)
+
+
+def _consumption_options(
+    period: str,
+    date_from: str | None,
+    date_to: str | None,
+    family: list[str] | None,
+) -> tuple[str, set[str] | None, date | None, date]:
+    if period not in ("day", "month"):
+        raise UsageError("--period must be 'day' or 'month'")
+    families = {item.casefold() for item in (family or [])} or None
+    if families:
+        unknown = families - api.CONSUMPTION_FAMILIES
+        if unknown:
+            raise UsageError(f"unknown product family: {', '.join(sorted(unknown))}")
+    today = date.today()
+    start = api.parse_date(date_from, today) if date_from else None
+    end = api.parse_date(date_to, today) if date_to else today
+    if start and start > end:
+        raise UsageError("--from must be before --to")
+    return period, families, start, end
 
 
 def _interactive() -> bool:
@@ -194,15 +228,11 @@ def consumption(
     """Electricity, gas and solar consumption series for the selected supplies."""
     _apply_supply(ctx, supply)
     state: State = ctx.obj
+    period, families, start, end = _check(
+        lambda: _consumption_options(period, date_from, date_to, family)
+    )
 
     def operation(client: Any, _tokens: Any) -> Any:
-        families = {item.casefold() for item in (family or [])} or None
-        if families:
-            unknown = families - api.CONSUMPTION_FAMILIES
-            if unknown:
-                raise UsageError(f"unknown product family: {', '.join(sorted(unknown))}")
-        start = api.parse_date(date_from, date.today()) if date_from else None
-        end = api.parse_date(date_to, date.today()) if date_to else None
         selected = _supplies(client, state)
         return api.get_consumption(
             client,
@@ -246,6 +276,79 @@ def cases(ctx: typer.Context) -> None:
     """Claims and other cases already filed with Naturgy."""
     state: State = ctx.obj
     _run(ctx, lambda client, _tokens: api.get_cases(client, raw=state.raw))
+
+
+@battery_app.command("status")
+def battery_status(ctx: typer.Context) -> None:
+    """Virtual battery balance, automatic/manual mode and activation dates."""
+    state: State = ctx.obj
+    _run(
+        ctx,
+        lambda client, _tokens: api.get_battery_status(client, raw=state.raw),
+    )
+
+
+@battery_app.command("history")
+def battery_history(
+    ctx: typer.Context,
+    page: Annotated[
+        int, typer.Option("--page", help="Page number, starting at 1.")
+    ] = 1,
+    limit: Annotated[
+        int,
+        typer.Option(
+            "--limit",
+            help=f"Movements per page (1-{api.BATTERY_HISTORY_MAX_LIMIT}).",
+        ),
+    ] = 20,
+    supply: SupplyOption = None,
+) -> None:
+    """Battery movements: charges, discharges, expirations and invoice adjustments."""
+    _apply_supply(ctx, supply)
+    state: State = ctx.obj
+    _check(lambda: api.validate_battery_history(page, limit))
+
+    def operation(client: Any, _tokens: Any) -> Any:
+        return api.get_battery_history(
+            client,
+            page=page,
+            limit=limit,
+            supply=state.supply,
+            raw=state.raw,
+        )
+
+    _run(ctx, operation)
+
+
+@battery_app.command("evolution")
+def battery_evolution(
+    ctx: typer.Context,
+    year: Annotated[
+        int | None, typer.Option("--year", help="Year (default: the current one).")
+    ] = None,
+) -> None:
+    """Monthly evolution of the virtual battery balance."""
+    state: State = ctx.obj
+    selected = _check(lambda: api.validate_battery_year(year))
+    _run(
+        ctx,
+        lambda client, _tokens: api.get_battery_evolution(
+            client, selected, raw=state.raw
+        ),
+    )
+
+
+@battery_app.command("assignments")
+def battery_assignments(ctx: typer.Context, supply: SupplyOption = None) -> None:
+    """Balance assigned to each supply point."""
+    _apply_supply(ctx, supply)
+    state: State = ctx.obj
+    _run(
+        ctx,
+        lambda client, _tokens: api.get_battery_assignments(
+            client, supply=state.supply, raw=state.raw
+        ),
+    )
 
 
 @invoices_app.command("list")
@@ -292,6 +395,23 @@ def invoices_download(
     _run(ctx, operation)
 
 
+def _claim_preflight(
+    *,
+    dry_run: bool,
+    yes: bool,
+    message: str,
+    reason: str | None,
+    attachments: list[Path] | None,
+) -> None:
+    if not (dry_run or yes or _interactive()):
+        raise UsageError(
+            "not sent: filing a claim needs confirmation; run it in a terminal, or pass --yes"
+        )
+    api.claim_text(message)
+    api.resolve_reason(reason)
+    api.validate_attachments(attachments or [])
+
+
 @invoices_app.command("claim")
 def invoices_claim(
     ctx: typer.Context,
@@ -324,21 +444,34 @@ def invoices_claim(
     yes: Annotated[
         bool, typer.Option("--yes", "-y", help="Send without asking for confirmation.")
     ] = False,
+    force: Annotated[
+        bool,
+        typer.Option(
+            "--force",
+            help="Send even if the open-claim check cannot be completed.",
+        ),
+    ] = False,
     supply: SupplyOption = None,
 ) -> None:
     """File a bill review ("Revisa tu factura") about one invoice. This SENDS a claim.
 
     On a terminal it shows what will be sent and asks first; elsewhere it needs --yes.
     --dry-run runs the read-only checks and prints the body without sending.
+    --force sends when the open-claim check failed; a confirmed open claim still blocks.
     """
     _apply_supply(ctx, supply)
     state: State = ctx.obj
+    _check(
+        lambda: _claim_preflight(
+            dry_run=dry_run,
+            yes=yes,
+            message=message,
+            reason=reason,
+            attachments=attach,
+        )
+    )
 
     def operation(client: Any, _tokens: Any) -> Any:
-        if not (dry_run or yes or _interactive()):
-            raise UsageError(
-                "not sent: filing a claim needs confirmation; run it in a terminal, or pass --yes"
-            )
         draft = api.prepare_claim(
             client,
             _tokens,
@@ -358,7 +491,7 @@ def invoices_claim(
             }
         if not yes and not _confirm_claim(draft):
             raise CancelledError("not sent: the claim was not confirmed")
-        return api.send_claim(client, draft)
+        return api.send_claim(client, draft, force=force)
 
     _run(ctx, operation)
 

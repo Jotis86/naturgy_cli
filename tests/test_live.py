@@ -48,3 +48,16 @@ def test_invoices_live():
 
     payload = api.run_with_client(live_store(), operation)
     assert isinstance(payload["invoices"], list)
+
+
+def test_battery_live():
+    payload = api.run_with_client(
+        live_store(), lambda client, _: api.get_battery_status(client)
+    )
+    assert payload["currency"] == "EUR"
+    assert "balance" in payload
+
+    history = api.run_with_client(
+        live_store(), lambda client, _: api.get_battery_history(client, limit=1)
+    )
+    assert isinstance(history["movements"], list)

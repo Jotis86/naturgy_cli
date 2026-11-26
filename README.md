@@ -25,6 +25,10 @@ browser is needed at runtime. Its JSON output is meant for scripts and coding ag
 | `naturgy invoices download` | Invoice PDFs: one, the latest, or all | ✅ |
 | `naturgy debt` | Pending invoices and other debt | ✅ |
 | `naturgy cases` | Claims and cases already filed with Naturgy | ✅ |
+| `naturgy battery status` | Virtual battery balance, mode and activation dates | ✅ |
+| `naturgy battery history` | Virtual battery movements (charges, discharges, expirations) | ✅ |
+| `naturgy battery evolution` | Monthly evolution of the virtual battery balance | ✅ |
+| `naturgy battery assignments` | Balance assigned per supply point | ✅ |
 | `naturgy invoices claim` | File a bill review (**sends a claim**, after confirmation) | ✅ |
 
 Everything is read-only except `naturgy invoices claim`.
@@ -42,16 +46,36 @@ From a checkout (recommended while the API mapping is being validated):
 ```bash
 git clone <your-repo> naturgy-cli
 cd naturgy-cli
-uv sync
-./scripts/run.sh --help          # run this checkout without relying on the editable .pth
+./scripts/sync.sh                # uv sync + repair the macOS editable .pth
+./scripts/run.sh --help          # development: live code, no editable .pth needed
 # optional: install this checkout as a tool (a regular wheel, no editable .pth)
 uv tool install .
 ```
 
 `scripts/run.sh` puts `src/` on `PYTHONPATH` and runs `python -m naturgy`, so code changes apply
-immediately. If `uv run naturgy` fails with `ModuleNotFoundError` after `uv sync`, that is a macOS
-`hidden` flag on the editable `.pth`; use `./scripts/run.sh`, or run
-`uv sync --no-editable` and then `uv run --no-sync naturgy`.
+immediately. `scripts/sync.sh` is `uv sync` plus `scripts/fix-venv.sh`, which clears the macOS
+`hidden` flag from the venv so `uv run naturgy` also works. For daily use, `uv tool install .` is
+the most robust option: it installs a wheel and never depends on an editable `.pth`.
+
+### `ModuleNotFoundError: No module named 'naturgy'` after `uv sync`
+
+This is a macOS/Python 3.12 issue with editable installs, not a CLI bug. The editable install is a
+`.pth` file, and Python 3.12+ skips `.pth` files marked hidden (`UF_HIDDEN`). `PYTHONPATH=src` and
+`scripts/run.sh` bypass it, which is why the CLI works when launched that way.
+
+Repair the current venv:
+
+```bash
+./scripts/fix-venv.sh
+# manual equivalent:
+ls -lO .venv/lib/python*/site-packages/naturgy_cli.pth
+chflags -R nohidden .venv
+.venv/bin/python -c "import naturgy; print(naturgy.__file__)"
+```
+
+If it comes back after `uv sync`, use `./scripts/sync.sh` instead, or avoid editable installs:
+`uv sync --no-editable` and then `uv run --no-sync naturgy --version`. See
+[astral-sh/uv#16977](https://github.com/astral-sh/uv/issues/16977).
 
 ## Authentication
 
@@ -128,6 +152,11 @@ naturgy readings
 naturgy debt
 naturgy cases
 
+naturgy battery status
+naturgy battery history --page 1 --limit 20
+naturgy battery evolution --year 2026
+naturgy battery assignments
+
 naturgy invoices list
 naturgy invoices show <invoice-id>
 naturgy invoices download                          # latest PDF into the current directory
@@ -137,6 +166,7 @@ naturgy invoices download <invoice-id>
 naturgy invoices claim latest -m "No reconozco el cargo de 12,40 EUR" --reason wrong-charge
 naturgy invoices claim <invoice-id> -m "..." --attach foto.png --dry-run
 naturgy invoices claim <invoice-id> -m "..." --yes
+naturgy invoices claim <invoice-id> -m "..." --yes --force   # only when the open-claim check failed
 ```
 
 Global options:
@@ -207,6 +237,36 @@ appears under its final name only when it is complete, and it is written with mo
 `unlimited`/missing numeric values are `null` rather than a made-up zero. Dates are passed through
 as Naturgy sends them (usually ISO `YYYY-MM-DD`).
 
+### Virtual battery
+
+`naturgy battery status` reads the current balance, whether the discount mode is automatic and the
+activation dates. `history` lists charges, discharges and expirations one page at a time (`--page`
+starts at 1; `--limit` is 1–100). `evolution --year YYYY` shows the monthly balance by origin, and
+`assignments` shows the balance reserved for each supply point.
+
+These commands are read-only. Changing the mode or assigning balance is not exposed. `--supply`
+filters `history` and `assignments` by contract, supply id or address. In `history` the filter
+applies to the requested page, so a supply that only appears on another page will show no results.
+
+```json
+// naturgy battery status
+{
+  "balance": 12.34,
+  "currency": "EUR",
+  "is_active": true,
+  "is_automatic": false,
+  "date_enabled": "2025-02-03T00:00:00.000Z",
+  "date_disabled": null,
+  "breakdown": [
+    {"code": "01", "total": 12.34, "date_enabled": "2025-02-03T00:00:00.000Z", "date_disabled": null}
+  ]
+}
+```
+
+`history` returns `movements` with `concept`, `kind` (`charge`, `discharge`, `expired` or
+`adjustment`), `amount`, `invoice_id`, `contract`, `is_self_consumption` and dates, plus
+`page`/`total_pages`/`total_items`.
+
 ### Bill reviews (claims)
 
 `naturgy invoices claim TARGET --message TEXT` files a bill review ("Revisa tu factura") about one
@@ -236,6 +296,9 @@ Attachments (`--attach`, repeatable) must be PNG, JPEG or PDF, up to 2 MB each a
   without a ticket), it exits `5` with `outcome_unknown`; run `naturgy cases` before trying again.
 - If the invoice's account already has an open claim, it exits `5` with `claim_already_open` and
   sends nothing.
+- Before sending, it checks `naturgy cases` for an open claim. If that check cannot be completed
+  (timeout, 5xx or bot protection), it exits `5` with `claim_check_failed` and sends nothing.
+  Pass `--force` to send anyway; a check that *did* confirm an open claim still blocks.
 
 ## Errors and exit codes
 
@@ -256,11 +319,12 @@ Errors go to stderr as JSON:
 | 3 | `access_denied` | That account or supply was refused, not the session |
 | 5 | `blocked`, `upstream_unavailable` | Bot protection, rate limit, timeout or Naturgy 5xx |
 | 5 | `claim_already_open` | The invoice's account already has an open claim; nothing was sent |
+| 5 | `claim_check_failed` | The open-claim check failed; nothing was sent (use `--force` to send anyway) |
 | 5 | `outcome_unknown` | A claim may or may not have been filed; check `naturgy cases` |
 | 7 | `api_changed` | Unexpected status or response shape; the API probably changed |
 
-Requests are sent one at a time with a short delay and are never retried automatically. The only
-automatic request is the initial `/clients` lookup that scopes the session.
+Requests are sent one at a time with a short delay and are never retried automatically. A claim
+checks `naturgy cases` before sending; the initial `/clients` lookup scopes the session.
 
 ## Limitations
 
@@ -280,8 +344,9 @@ automatic request is the initial `/clients` lookup that scopes the session.
 ## Development
 
 ```bash
-uv sync
-uv run --no-sync pytest
+./scripts/sync.sh                  # uv sync + the macOS editable-install repair
+./scripts/check.sh                 # ruff + pytest with coverage
+uv run --no-sync pytest            # tests only
 ```
 
 The tests are offline and use synthetic fixtures. Live read-only tests are opt-in:
@@ -310,14 +375,19 @@ src/naturgy/
   cli.py          Typer app: commands and exit codes
   auth.py         sign-in, status, logout, browser token import
   client.py       OmegaClient: headers, pacing, error mapping, WAF detection
-  api.py          read operations, normalization, PDFs and filing a claim
+  api.py          read operations, battery, normalization, PDFs and claims
   models.py       token-set model
   output.py       JSON rendering
   tokens.py       token file, lock, JWT expiry
   errors.py       typed errors and exit codes
   config.py       hosts, headers, token-file lookup
-scripts/probe.py  read-only shape discovery
-tests/            offline unit tests and opt-in live tests
+scripts/
+  run.sh           run this checkout with src/ on PYTHONPATH
+  check.sh         ruff + pytest with coverage
+  sync.sh          uv sync + fix the macOS editable .pth
+  fix-venv.sh      clear hidden flags and verify `import naturgy`
+  probe.py         read-only shape discovery
+tests/             offline unit tests and opt-in live tests
 ```
 
 ## License
