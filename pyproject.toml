@@ -1,0 +1,61 @@
+[project]
+name = "naturgy-cli"
+version = "0.1.0"
+description = "JSON-first CLI for your own Naturgy España (Omega) account"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Naturgy CLI contributors" }]
+keywords = ["naturgy", "naturgy-espana", "omega", "luz", "gas", "cli", "json"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: End Users/Desktop",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Utilities",
+]
+requires-python = ">=3.12"
+dependencies = [
+    "httpx>=0.28.1",
+    "pydantic>=2.9",
+    "typer>=0.15",
+]
+
+[project.urls]
+Homepage = "https://github.com/"
+Source = "https://github.com/"
+Issues = "https://github.com/"
+
+[project.scripts]
+naturgy = "naturgy.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.12.5,<0.14.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "naturgy"
+source-exclude = [
+    "**/.local-secrets",
+    "**/.local",
+    "**/.env",
+    "**/.env.*",
+    "**/*.cookies",
+    "**/*.har",
+    "**/*.pdf",
+    "**/*.part",
+]
+
+[dependency-groups]
+dev = ["pytest>=8.3"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+markers = ["live: runs against the real account; skipped unless NATURGY_LIVE=1"]

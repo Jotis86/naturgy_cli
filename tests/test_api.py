@@ -1,0 +1,268 @@
+from __future__ import annotations
+
+import base64
+
+import pytest
+
+from naturgy import api
+from naturgy.errors import ClaimAlreadyOpenError, UsageError
+from naturgy.models import TokenSet
+
+RAW_SUPPLY = {
+    "serviceAccountId": "SA1",
+    "clientId": "C1",
+    "supplyAddress": {"fullAddress": "Calle Falsa 1, 28001 Madrid", "zipCode": "28001"},
+    "billingAccountList": [
+        {
+            "billingAccountId": "BA1",
+            "refNum": "REF1",
+            "isDirectPayment": True,
+            "payDay": "5",
+            "bankAccount": {"iban": "ES1234567890123456789012"},
+            "products": [
+                {
+                    "contractId": "CT1",
+                    "contractNumber": "CN1",
+                    "billingAccountId": "BA1",
+                    "productType": {
+                        "productTypeFamily": "luz",
+                        "productTypeName": "Tarifa Luz",
+                        "productCode": "E0001",
+                        "productStatus": "03",
+                        "Assetid": "A1",
+                    },
+                    "techData": {
+                        "cups": "ES0000000001",
+                        "rate": "2.0TD",
+                        "powerPlain": 4.6,
+                        "powerValley": 4.6,
+                    },
+                }
+            ],
+        }
+    ],
+}
+
+RAW_INVOICE = {
+    "invoiceId": "INV1",
+    "type": "NC",
+    "status": "03",
+    "issuedDate": "2026-10-01",
+    "billingDate": "2026-10-01",
+    "amount": 54.21,
+    "pendingAmount": 0,
+    "pdfDocumentId": "PDF1",
+    "productInvoiceRelationList": [
+        {
+            "contractId": "CT1",
+            "contractNumber": "CN1",
+            "productFamilyId": "luz",
+            "billingAccountId": "BA1",
+            "invoice": "ATR1",
+        }
+    ],
+}
+
+
+class FakeClient:
+    def __init__(self, responses, info=None):
+        self.responses = responses
+        self.info = info or {
+            "docNumber": "00000000T",
+            "preferredContact": {"contactId": "CONT1"},
+        }
+        self.calls = []
+
+    def request(self, method, path, *, params=None, json=None, auth=True, expect_json=True):
+        self.calls.append(
+            {"method": method, "path": path, "params": params, "json": json}
+        )
+        value = self.responses.get((method, path))
+        if value is None:
+            value = self.responses.get(path)
+        if value is None:
+            raise AssertionError(f"unexpected request: {method} {path}")
+        if callable(value):
+            return value(params, json)
+        return value
+
+    def get_client_info(self):
+        return self.info
+
+
+def supplies():
+    return [api._normalize_supply(RAW_SUPPLY)]
+
+
+def invoice_responses(invoice=None):
+    if isinstance(invoice, dict) and "InvoicesPDS" in invoice:
+        payload = invoice
+    else:
+        payload = {"InvoicesPDS": [invoice or RAW_INVOICE], "isContingencyMode": False}
+    return {
+        "contractAccountsNew": {"serviceAccountList": [RAW_SUPPLY]},
+        ("GET", "invoices"): payload,
+    }
+
+
+def test_normalize_supply_and_mask_iban():
+    supply = supplies()[0]
+    assert supply["service_account_id"] == "SA1"
+    assert supply["address"] == "Calle Falsa 1, 28001 Madrid"
+    product = supply["products"][0]
+    assert product["contract_number"] == "CN1"
+    assert product["product_family"] == "luz"
+    assert product["cups"] == "ES0000000001"
+    assert product["is_active"] is True
+    assert supply["billing_accounts"][0]["iban_masked"] == "ES12 **** **** 9012"
+
+
+def test_invoices_use_billing_ref_and_prefer_pending():
+    duplicate = dict(RAW_INVOICE, pendingAmount=12.5)
+    client = FakeClient(invoice_responses({"InvoicesPDS": [RAW_INVOICE, duplicate]}))
+    result = api.get_invoices(client, supplies())
+    assert result["count"] == 1
+    assert result["invoices"][0]["pending_amount"] == 12.5
+    call = next(call for call in client.calls if call["path"] == "invoices")
+    assert call["params"]["contractAccountId"] == "REF1"
+    assert call["params"]["contractNumbers"] == "CN1"
+    assert call["params"]["cups"] == "ES0000000001"
+
+
+def test_invoice_of_another_family_is_filtered():
+    gas = dict(RAW_INVOICE, invoiceId="INV2")
+    gas["productInvoiceRelationList"] = [
+        dict(RAW_INVOICE["productInvoiceRelationList"][0], productFamilyId="gas")
+    ]
+    client = FakeClient(invoice_responses({"InvoicesPDS": [gas]}))
+    result = api.get_invoices(client, supplies())
+    assert result["count"] == 0
+
+
+def test_invoice_filename_is_safe():
+    assert (
+        api.invoice_filename({"invoice_id": "AB/12 34", "billing_date": "2026-10-01"})
+        == "factura_2026-10_AB_12_34.pdf"
+    )
+    assert (
+        api.invoice_filename({"invoice_id": "../x", "issued_date": ""})
+        == "factura_x.pdf"
+    )
+    assert (
+        api.invoice_filename({"invoice_id": "X", "billing_date": "01/10/2026"})
+        == "factura_2026-10_X.pdf"
+    )
+
+
+def test_decode_pdf():
+    payload = b"%PDF-1.7 test"
+    assert api._decode_pdf(base64.b64encode(payload).decode()) == payload
+    assert api._decode_pdf("data:application/pdf;base64," + base64.b64encode(payload).decode()) == payload
+
+
+def test_claim_text_validation():
+    assert api.claim_text("  hola\nmundo  ") == "hola\nmundo"
+    with pytest.raises(UsageError):
+        api.claim_text("")
+    with pytest.raises(UsageError):
+        api.claim_text("x" * (api.config.CLAIM_MAX_LENGTH + 1))
+    with pytest.raises(UsageError):
+        api.claim_text("hola\x00mundo")
+
+
+def test_prepare_claim_payload():
+    client = FakeClient(invoice_responses())
+    tokens = TokenSet(token="access", user={"clientCode": "00000000T"})
+    draft = api.prepare_claim(
+        client,
+        tokens,
+        "INV1",
+        "No reconozco el cargo",
+        reason="wrong-charge",
+        supplies=supplies(),
+    )
+    payload = draft.payload
+    assert payload["managementType"] == "claimInvoice"
+    assert payload["reasonSelected"] == "03"
+    assert payload["invoiceId"] == "INV1"
+    assert payload["issuedDate"] == "2026-10-01"
+    assert payload["serviceAccountId"] == "SA1"
+    assert payload["contractId"] == "CT1"
+    assert payload["billingAccountId"] == "BA1"
+    assert payload["invoiceAtrId"] == "ATR1"
+    assert payload["preferredContactId"] == "CONT1"
+    assert payload["product"]["assetId"] == "A1"
+    assert payload["product"]["productTypeFamily"] == "luz"
+    assert payload["files"] == []
+    assert draft.invoice_amount == 54.21
+
+
+def test_send_claim_success():
+    responses = invoice_responses()
+    responses[("GET", "cases")] = {"cases": []}
+    responses[("POST", "cases")] = {"caseId": "CASE1", "caseCode": "CODE1"}
+    client = FakeClient(responses)
+    tokens = TokenSet(token="access", user={"clientCode": "00000000T"})
+    draft = api.prepare_claim(
+        client, tokens, "INV1", "No reconozco el cargo", supplies=supplies()
+    )
+    result = api.send_claim(client, draft)
+    assert result["case_id"] == "CASE1"
+    assert result["case_code"] == "CODE1"
+    assert result["invoice_id"] == "INV1"
+
+
+def test_send_claim_refuses_when_open():
+    responses = invoice_responses()
+    responses[("GET", "cases")] = {
+        "cases": [
+            {
+                "typeId": "claimInvoice",
+                "state": "Abierto",
+                "invoiceId": "INV1",
+                "billingAccountId": "BA1",
+                "contractId": "CT1",
+            }
+        ]
+    }
+    client = FakeClient(responses)
+    tokens = TokenSet(token="access", user={"clientCode": "00000000T"})
+    draft = api.prepare_claim(
+        client, tokens, "INV1", "No reconozco el cargo", supplies=supplies()
+    )
+    with pytest.raises(ClaimAlreadyOpenError):
+        api.send_claim(client, draft)
+
+
+def test_consumption_series():
+    client = FakeClient(
+        {
+            "consumptions": {
+                "consumptionValues": [
+                    {
+                        "date": "2026-09-01",
+                        "valueTotal": "10.500",
+                        "valuePlain": "4",
+                        "valueValley": "2",
+                        "P1": "1",
+                    }
+                ]
+            }
+        }
+    )
+    result = api.get_consumption(client, supplies(), period="month")
+    product = result["products"][0]
+    assert product["product_family"] == "luz"
+    assert product["series"][0]["total"] == 10.5
+    assert product["series"][0]["p1"] == 1.0
+    call = client.calls[0]
+    assert call["params"]["startDate"].count("/") == 2
+    assert call["params"]["productType"] == "luz"
+
+
+def test_select_supplies():
+    assert len(api.select_supplies(supplies(), "REF1")) == 1
+    assert len(api.select_supplies(supplies(), "CN1")) == 1
+    assert len(api.select_supplies(supplies(), "ES0000")) == 1
+    with pytest.raises(UsageError):
+        api.select_supplies(supplies(), "does-not-exist")
