@@ -284,10 +284,12 @@ NATURGY_LIVE=1 uv run --no-sync pytest -m live
 To validate the wire shapes against a real account without sharing personal data:
 
 ```bash
-uv run python scripts/probe.py
+./scripts/run.sh auth login          # once; saves .local-secrets/tokens.json
+uv run python scripts/probe.py       # reuses that session
 ```
 
-It prompts for NIF/NIE and password locally, calls the read-only endpoints and writes
+If there is no usable session it prompts for NIF/NIE and password once. `--save-tokens` also saves
+the session in that case. The probe calls the read-only endpoints and writes
 `.local-secrets/shapes.json` with **only keys, types, array lengths and sample shapes**. It never
 sends a claim, never stores the password and never prints a token. The file is gitignored and mode
 `0600`.

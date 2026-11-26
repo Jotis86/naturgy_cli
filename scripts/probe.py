@@ -34,7 +34,7 @@ if SRC.is_dir() and str(SRC) not in sys.path:
 
 from naturgy import config
 from naturgy.client import OmegaClient
-from naturgy.errors import NaturgyError
+from naturgy.errors import AuthError, NaturgyError
 from naturgy.tokens import FileTokenStore
 
 ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}([T ][0-9:.+Z-]+)?$")
@@ -125,21 +125,56 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--nif", help="Skip the NIF prompt. The password is always prompted.")
     parser.add_argument(
+        "--tokens",
+        type=Path,
+        default=config.default_tokens_path(),
+        help="Existing session file to reuse (default: the normal token file).",
+    )
+    parser.add_argument(
         "--limit", type=int, default=3, help="Maximum supplies/accounts to probe (default: 3)."
     )
     args = parser.parse_args(argv)
 
-    nif = (args.nif or input("NIF/NIE: ")).strip()
-    password = getpass.getpass("Contraseña (no se guarda): ")
-    if not nif or not password:
-        print("NIF and password are required.", file=sys.stderr)
-        return 2
-
-    endpoints: dict[str, Any] = {}
-    errors: dict[str, Any] = {}
-    summary: dict[str, Any] = {}
+    store = FileTokenStore(args.tokens)
     client = OmegaClient()
-    try:
+    info: dict[str, Any] | None = None
+    tokens = None
+
+    if store.path.exists():
+        try:
+            saved = store.load()
+            if saved is not None:
+                client.close()
+                client = OmegaClient(saved)
+                info = client.get_client_info()
+                tokens = saved
+                print(f"Reusing the session at {store.path}", file=sys.stderr)
+        except AuthError:
+            print("The saved session is not usable; asking for credentials.", file=sys.stderr)
+            client.close()
+            client = OmegaClient()
+            tokens = None
+        except NaturgyError as error:
+            print(
+                json.dumps(
+                    {
+                        "error": {
+                            "type": error.error_type,
+                            "code": error.code,
+                            "http_status": error.http_status,
+                        }
+                    }
+                ),
+                file=sys.stderr,
+            )
+            return error.exit_code
+
+    if tokens is None:
+        nif = (args.nif or input("NIF/NIE: ")).strip()
+        password = getpass.getpass("Contraseña (no se guarda): ")
+        if not nif or not password:
+            print("NIF and password are required.", file=sys.stderr)
+            return 2
         print("Signing in...", file=sys.stderr)
         try:
             tokens = client.login(nif, password)
@@ -158,12 +193,18 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return error.exit_code
-
         if args.save_tokens:
-            store = FileTokenStore(config.default_tokens_path())
             with store.lock():
                 store.save(tokens)
             print(f"Session saved to {store.path}", file=sys.stderr)
+
+    endpoints: dict[str, Any] = {}
+    errors: dict[str, Any] = {}
+    summary: dict[str, Any] = {}
+
+    try:
+        if info is None:
+            info = client.get_client_info()
 
         def record(name: str, call: Callable[[], Any]) -> Any:
             print(f"  {name}", file=sys.stderr)
@@ -282,7 +323,7 @@ def main(argv: list[str] | None = None) -> int:
             doc_number = (
                 _text(info.get("docNumber"))
                 or _text(tokens.user.get("clientCode"))
-                or nif
+                or tokens.nif
             )
             if pdf_id and doc_number:
                 record(
@@ -302,6 +343,20 @@ def main(argv: list[str] | None = None) -> int:
         summary["invoices_in_first_call"] = len(first_invoices)
         summary["endpoints_ok"] = len(endpoints)
         summary["endpoints_failed"] = len(errors)
+    except NaturgyError as error:
+        print(
+            json.dumps(
+                {
+                    "error": {
+                        "type": error.error_type,
+                        "code": error.code,
+                        "http_status": error.http_status,
+                    }
+                }
+            ),
+            file=sys.stderr,
+        )
+        return error.exit_code
     finally:
         client.close()
 
