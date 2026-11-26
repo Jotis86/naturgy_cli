@@ -41,7 +41,16 @@ ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}([T ][0-9:.+Z-]+)?$")
 SLASH_DATE = re.compile(r"^\d{1,2}/\d{1,2}/\d{4}$")
 NUMERIC = re.compile(r"^-?\d+(?:[.,]\d+)?$")
 BASE64ISH = re.compile(r"^[A-Za-z0-9+/=]{200,}$")
+SAFE_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]{0,63}$")
 CONSUMPTION_FAMILIES = {"luz", "gas", "solar", "recarga"}
+
+
+def _safe_key(value: Any) -> str:
+    """Keep structural field names; redact keys that look like values (phones, emails, ids)."""
+    key = str(value)
+    if key.isdigit() or len(key) > 64 or "@" in key or "/" in key or not SAFE_KEY.match(key):
+        return "<redacted-key>"
+    return key
 
 
 def shape(value: Any, sample: int = 3) -> Any:
@@ -69,7 +78,7 @@ def shape(value: Any, sample: int = 3) -> Any:
             "__sample__": [shape(item, sample=sample) for item in value[:sample]],
         }
     if isinstance(value, dict):
-        return {str(key): shape(item, sample=sample) for key, item in value.items()}
+        return {_safe_key(key): shape(item, sample=sample) for key, item in value.items()}
     return f"__{type(value).__name__}__"
 
 

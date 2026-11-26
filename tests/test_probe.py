@@ -46,3 +46,20 @@ def test_shape_scalars():
     assert probe.shape(True) == "boolean"
     assert probe.shape(1) == "number"
     assert probe.shape("2026-10-01") == "string(iso-date)"
+
+
+def test_shape_redacts_value_like_keys():
+    probe = load_probe()
+    dumped = json.dumps(
+        probe.shape(
+            {
+                "600000001": {"x": 1},
+                "ana@example.com": 2,
+                "normalKey": 3,
+            }
+        )
+    )
+    assert "600000001" not in dumped
+    assert "ana@example.com" not in dumped
+    assert "normalKey" in dumped
+    assert "<redacted-key>" in dumped

@@ -37,15 +37,25 @@ CLAIM_ATTACHMENT_SUFFIXES = (".png", ".jpg", ".jpeg", ".pdf")
 
 
 def default_tokens_path() -> Path:
-    """--tokens, then $NATURGY_TOKENS_FILE, then a source checkout, then ~/.config."""
+    """--tokens, then $NATURGY_TOKENS_FILE, then an existing session, then a checkout, then ~/.config.
+
+    The existing-session check comes before the checkout fallback so that a global `naturgy auth
+    login` (which writes ~/.config) is visible when the probe or tests run from a source checkout.
+    """
     env = os.environ.get(TOKENS_FILE_ENV)
     if env:
         return Path(env).expanduser()
 
     cwd = Path.cwd()
-    if (cwd / "pyproject.toml").is_file() and (cwd / "src" / "naturgy").is_dir():
-        return cwd / ".local-secrets" / "tokens.json"
-
+    local = cwd / ".local-secrets" / "tokens.json"
     xdg = os.environ.get("XDG_CONFIG_HOME")
     base = Path(xdg).expanduser() if xdg else Path.home() / ".config"
-    return base / "naturgy-cli" / "tokens.json"
+    installed = base / "naturgy-cli" / "tokens.json"
+
+    if local.is_file():
+        return local
+    if installed.is_file():
+        return installed
+
+    checkout = (cwd / "pyproject.toml").is_file() and (cwd / "src" / "naturgy").is_dir()
+    return local if checkout else installed

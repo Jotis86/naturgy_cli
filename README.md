@@ -85,9 +85,11 @@ The CLI looks for the file in this order, and `auth login` writes to the same pl
 
 1. `--tokens PATH`
 2. `$NATURGY_TOKENS_FILE`
-3. A source checkout: `./.local-secrets/tokens.json`
-4. An installed copy: `~/.config/naturgy-cli/tokens.json`, or
+3. An existing `./.local-secrets/tokens.json` (a checkout's local session)
+4. An existing `~/.config/naturgy-cli/tokens.json`, or
    `$XDG_CONFIG_HOME/naturgy-cli/tokens.json`
+5. A source checkout without a session yet: `./.local-secrets/tokens.json`
+6. An installed copy without a session yet: `~/.config/naturgy-cli/tokens.json`
 
 The file is written atomically with mode `0600`. Concurrent commands hold a lock on
 `tokens.json.lock` while they sign in or write.
