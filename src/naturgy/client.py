@@ -39,6 +39,7 @@ class OmegaClient:
         language: str | None = None,
         pacing: float | None = None,
         timeout: float | None = None,
+        transport: httpx.BaseTransport | None = None,
     ) -> None:
         self.tokens = tokens
         self.language = language or config.DEFAULT_LANGUAGE
@@ -54,6 +55,7 @@ class OmegaClient:
             timeout=self._timeout,
             follow_redirects=True,
             headers=self._base_headers(),
+            transport=transport,
         )
 
     def __enter__(self) -> Self:
