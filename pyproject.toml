@@ -29,9 +29,10 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/"
-Source = "https://github.com/"
-Issues = "https://github.com/"
+Homepage = "https://github.com/Jotis86/naturgy-cli"
+Source = "https://github.com/Jotis86/naturgy-cli"
+Issues = "https://github.com/Jotis86/naturgy-cli/issues"
+Security = "https://github.com/Jotis86/naturgy-cli/security/advisories/new"
 
 [project.scripts]
 naturgy = "naturgy.cli:main"

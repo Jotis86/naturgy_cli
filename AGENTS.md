@@ -1,6 +1,6 @@
 # naturgy-cli
 
-JSON-first CLI for the owner's Naturgy España (Omega) account. Read `README.md` before changing
+JSON-first CLI for your own Naturgy España (Omega) account. Read `README.md` before changing
 behavior.
 
 ## Commands

@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security problem
+    url: https://github.com/Jotis86/naturgy-cli/security/advisories/new
+    about: Never report tokens, credentials or personal account data in a public issue.
+  - name: Question or usage help
+    url: https://github.com/Jotis86/naturgy-cli#readme
+    about: Check the README first; every command writes JSON to stdout.
