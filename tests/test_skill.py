@@ -10,6 +10,7 @@ import re
 from pathlib import Path
 
 import typer
+import yaml
 
 from naturgy.cli import app
 
@@ -93,11 +94,15 @@ def test_skill_forbids_claims_and_raw_output():
     assert "must be typed by the user" in text
 
 
-def test_skill_has_frontmatter():
-    lines = SKILL.read_text(encoding="utf-8").splitlines()
+def test_skill_has_valid_frontmatter():
+    text = SKILL.read_text(encoding="utf-8")
+    lines = text.splitlines()
 
     assert lines[0] == "---"
     closing = lines.index("---", 1)
-    frontmatter = "\n".join(lines[1:closing])
-    assert "name: naturgy" in frontmatter
-    assert "description:" in frontmatter
+    frontmatter = yaml.safe_load("\n".join(lines[1:closing]))
+
+    assert isinstance(frontmatter, dict)
+    assert frontmatter["name"] == "naturgy"
+    assert len(frontmatter["description"]) > 60
+    assert "Naturgy" in frontmatter["description"]

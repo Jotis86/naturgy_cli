@@ -1,6 +1,6 @@
 ---
 name: naturgy
-description: Answers questions about the user's own Naturgy España account by running the `naturgy` CLI: invoices, electricity/gas/solar consumption, meter readings, pending debt, filed claims and the virtual battery. Use when the user asks about their Naturgy bill, how much energy they used, what they owe, or their battery balance.
+description: Answers questions about the user's own Naturgy España account by running the `naturgy` CLI — invoices, electricity/gas/solar consumption, meter readings, pending debt, filed claims and the virtual battery. Use when the user asks about their Naturgy bill, how much energy they used, what they owe, or their battery balance.
 when_to_use: The user mentions Naturgy, a factura, la luz, el gas, consumo, lectura del contador, deuda pendiente, reclamación, or batería virtual. Not for other energy providers.
 ---
 
