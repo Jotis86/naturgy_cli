@@ -7,7 +7,7 @@ token on disk, so bug reports can easily carry personal data. Please treat them 
 
 Do **not** open a public issue. Use GitHub's private reporting form:
 
-<https://github.com/Jotis86/naturgy-cli/security/advisories/new>
+<https://github.com/Jotis86/naturgy_cli/security/advisories/new>
 
 Include the affected version (`naturgy --version`), the exact command, and what happened. If you
 cannot use GitHub advisories, open a minimal issue asking for a private channel, without details.
