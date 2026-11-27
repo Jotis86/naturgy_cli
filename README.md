@@ -145,8 +145,12 @@ The file is written atomically with mode `0600`. Concurrent commands hold a lock
 ### No refresh token
 
 Naturgy's Omega API exposes no refresh endpoint (the web app stores a `refreshToken` but never
-exchanges it). When the access token expires you have to sign in again with `naturgy auth login` or
-import a fresh browser token. `naturgy auth status` tells you when that is needed.
+exchanges it). The access token lasts about a day, so expect to run `naturgy auth login` roughly
+once a day, or right before a batch of commands; `naturgy auth status` prints the exact expiry and
+`naturgy auth status --check` proves the session still works.
+
+If you would rather not retype the password, import a fresh browser token with
+`naturgy auth import`.
 
 ## Usage
 

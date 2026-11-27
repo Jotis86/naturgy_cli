@@ -19,10 +19,11 @@ Check before answering anything about the account:
 naturgy auth status
 ```
 
-Exit code 0 means there is a valid session; **exit code 3 means it expired**. Do not run
-`naturgy auth login`: it prompts for the password on a terminal and the password must be typed by
-the user, never by you. If the session expired, say so and ask the user to run `naturgy auth login`
-themselves.
+Exit code 0 means there is a valid session; **exit code 3 means it expired**, which happens about
+once a day. That is expected, not a bug: do not retry the command, do not investigate the API, and
+do not run `naturgy auth login` yourself. It prompts for the password on a terminal and the
+password must be typed by the user, never by you. Say the session expired and ask the user to run
+`naturgy auth login`, then carry on.
 
 ## Commands
 
