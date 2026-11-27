@@ -37,22 +37,35 @@ Everything is read-only except `naturgy invoices claim`.
 
 - A Naturgy España residential account you can log in to at <https://omegav2.naturgy.es>
 - macOS or Linux
-- Python 3.12+ and [uv](https://docs.astral.sh/uv/)
+- Homebrew, or Python 3.12+ and [uv](https://docs.astral.sh/uv/)
 
 ## Installation
 
-From a checkout (recommended while the API mapping is being validated):
+With Homebrew (macOS and Linux), no Python setup needed:
+
+```bash
+brew install Jotis86/tap/naturgy
+naturgy auth login
+```
+
+With [uv](https://docs.astral.sh/uv/), straight from PyPI:
+
+```bash
+uv tool install naturgy-cli
+```
+
+To work on the code, from a checkout (recommended while the API mapping is being validated):
 
 ```bash
 git clone https://github.com/Jotis86/naturgy_cli.git
-cd naturgy-cli
+cd naturgy_cli
 ./scripts/sync.sh                # uv sync + repair the macOS editable .pth
 ./scripts/run.sh --help          # development: live code, no editable .pth needed
 # optional: install this checkout as a tool (a regular wheel, no editable .pth)
 uv tool install .
 ```
 
-To install the CLI without a checkout, let uv build a wheel straight from the repository:
+To install the CLI from the repository instead of PyPI, let uv build a wheel on the fly:
 
 ```bash
 uv tool install git+https://github.com/Jotis86/naturgy_cli.git
