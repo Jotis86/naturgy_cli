@@ -319,6 +319,34 @@ Attachments (`--attach`, repeatable) must be PNG, JPEG or PDF, up to 2 MB each a
   (timeout, 5xx or bot protection), it exits `5` with `claim_check_failed` and sends nothing.
   Pass `--force` to send anyway; a check that *did* confirm an open claim still blocks.
 
+## Using it from coding agents
+
+Every command writes JSON to stdout, so an agent with shell access (Claude Code, Codex, anything
+that runs commands) can answer questions like "how much did I spend on electricity in the last six
+months?" by running the CLI and reading the output.
+
+The skill in [`skills/naturgy/SKILL.md`](skills/naturgy/SKILL.md) tells an agent which commands
+exist and, more importantly, which ones it must never run: `naturgy invoices claim` (it files a
+real claim), `--raw` (personal data) and `naturgy auth login` (the password is typed by the human).
+`tests/test_skill.py` fails if the skill drifts from the CLI.
+
+Install it for Claude Code:
+
+```bash
+mkdir -p ~/.claude/skills/naturgy
+curl -fsSL https://raw.githubusercontent.com/Jotis86/naturgy_cli/main/skills/naturgy/SKILL.md \
+  -o ~/.claude/skills/naturgy/SKILL.md
+```
+
+After that, "¿cuánto pagué de luz en los últimos seis meses?" is enough: the agent runs
+`naturgy consumption --period month --family luz` and answers with the numbers. Without the skill,
+mention the command explicitly ("usa `naturgy`") and the agent will discover the rest with
+`--help`.
+
+Signing in stays manual, by design: run `naturgy auth login` yourself, and the agent reuses that
+session until it expires (exit code 3). Granting the agent permission to run `naturgy` is fine;
+granting it `naturgy invoices claim` is not.
+
 ## Errors and exit codes
 
 Errors go to stderr as JSON:
