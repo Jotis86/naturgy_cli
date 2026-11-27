@@ -1,6 +1,6 @@
 [project]
 name = "naturgy-cli"
-version = "0.1.0"
+version = "0.1.1"
 description = "JSON-first CLI for your own Naturgy España (Omega) account"
 readme = "README.md"
 license = "MIT"
